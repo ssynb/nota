@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { startFakeLLM } from './fake-llm.ts';
 import { startServer, tempDb, run, state, newUser, setPlan } from './support.ts';
 
@@ -107,4 +108,64 @@ test('a run orphaned by a server crash is refunded and its idempotency key can b
   assert.ok(retry.done);
   assert.equal(s.user.used, 1);
   assert.equal(s.notes.length, 1);
+});
+
+test('a stale owner whose run was taken over can neither add actions nor disturb the new result', async () => {
+  const user = newUser();
+  const idemKey = randomUUID();
+  const slowLlm = await startFakeLLM(1500);
+  const stale = await startServer(db, slowLlm.url, '2026-11-02T04:00:00Z');
+  const takeover = await startServer(db, llm.url, '2026-11-02T04:02:00Z');
+  const staleRes = await fetch(`${stale.url}/api/runs`, {
+    method: 'POST',
+    headers: { 'x-user-id': user, 'x-timezone': 'Asia/Shanghai', 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '买牛奶', mode: 'note', idemKey }),
+  });
+
+  const fresh = await run(takeover.url, user, '买牛奶', { idemKey });
+  const staleBody = await staleRes.text();
+  const s = await state(takeover.url, user);
+  const replay = await run(takeover.url, user, '买牛奶', { idemKey });
+  stale.stop();
+  takeover.stop();
+  slowLlm.close();
+
+  assert.ok(fresh.done);
+  assert.match(staleBody, /event: error/);
+  assert.equal(s.user.used, 1);
+  assert.equal(s.todos.length, 1);
+  assert.equal(s.notes.length, 1);
+  assert.equal(replay.done.noteId, fresh.done.noteId);
+});
+
+test('a database created before run leases upgrades in place: history kept, orphaned run refunded and retryable', async () => {
+  const oldDb = tempDb();
+  const user = newUser();
+  const v1 = new DatabaseSync(oldDb);
+  v1.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free', 'pro')), tz TEXT NOT NULL);
+    CREATE TABLE usage (user_id TEXT NOT NULL, day TEXT NOT NULL, used INTEGER NOT NULL, PRIMARY KEY (user_id, day));
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, idem_key TEXT NOT NULL, day TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed')), result TEXT, UNIQUE (user_id, idem_key));
+    CREATE TABLE todos (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, run_id INTEGER NOT NULL, title TEXT NOT NULL, due_at TEXT, created_at TEXT NOT NULL);
+  `);
+  v1.prepare("INSERT INTO users VALUES (?, 'free', 'Asia/Shanghai')").run(user);
+  v1.prepare("INSERT INTO usage VALUES (?, '2026-11-02', 2)").run(user);
+  v1.prepare(`INSERT INTO runs VALUES (1, ?, 'done-key', '2026-11-02', 'done', ?)`).run(user, JSON.stringify({ mode: 'note', reply: '旧结果', noteId: null, steps: [] }));
+  v1.prepare(`INSERT INTO runs VALUES (2, ?, 'orphan-key', '2026-11-02', 'running', NULL)`).run(user);
+  v1.prepare("INSERT INTO todos VALUES (1, ?, 1, '旧待办', NULL, '2026-11-02T01:00:00Z'), (2, ?, 2, '半截待办', NULL, '2026-11-02T01:00:00Z')").run(user, user);
+  v1.close();
+
+  const upgraded = await startServer(oldDb, llm.url, '2026-11-02T04:00:00Z');
+  const before = await state(upgraded.url, user);
+  const replay = await run(upgraded.url, user, '旧', { idemKey: 'done-key' });
+  const retry = await run(upgraded.url, user, '买牛奶', { idemKey: 'orphan-key' });
+  const after = await state(upgraded.url, user);
+  upgraded.stop();
+
+  assert.equal(before.user.used, 1);
+  assert.deepEqual(before.todos.map((t: { title: string }) => t.title), ['旧待办']);
+  assert.equal(replay.done.reply, '旧结果');
+  assert.ok(retry.done);
+  assert.equal(after.user.used, 2);
 });
