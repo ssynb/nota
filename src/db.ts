@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 
 export const FREE_DAILY_LIMIT = 10;
+/** A running run's owner renews this lease; once it lapses (process died) the run is released. */
+export const RUN_LEASE_MS = 30_000;
 const BUSY_TIMEOUT_MS = 5000;
 
 export const db = new DatabaseSync(process.env.DB_PATH ?? 'nota.db', { timeout: BUSY_TIMEOUT_MS });
@@ -19,6 +22,7 @@ const SCHEMA = `
     user_id TEXT NOT NULL, idem_key TEXT NOT NULL,
     day TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed')),
+    owner TEXT, lease_until TEXT,
     result TEXT,
     UNIQUE (user_id, idem_key)
   );
@@ -46,7 +50,7 @@ export type Mode = 'note' | 'ask';
 export type Step = { tool: string; args: unknown; result: unknown };
 export type RunResult = { mode: Mode; reply: string; noteId: number | null; steps: Step[] };
 export type Reservation =
-  | { kind: 'run'; runId: number }
+  | { kind: 'run'; runId: number; owner: string }
   | { kind: 'replay'; result: RunResult }
   | { kind: 'busy' }
   | { kind: 'quota'; used: number; limit: number };
@@ -70,6 +74,7 @@ tx(() => db.exec(SCHEMA));
 db.exec('PRAGMA journal_mode = WAL');
 
 const now = () => new Date().toISOString();
+const leaseUntil = () => new Date(Date.now() + RUN_LEASE_MS).toISOString();
 
 /** Calendar date (YYYY-MM-DD) of `at` in the user's timezone; the quota day key. */
 export const localDay = (tz: string, at = new Date()) => at.toLocaleDateString('sv-SE', { timeZone: tz });
@@ -86,20 +91,38 @@ export function setPlan(userId: string, plan: Plan): boolean {
 
 const limitOf = (user: User) => (user.plan === 'free' ? FREE_DAILY_LIMIT : null);
 
+/** Undo every action the run took, refund its unit and mark it failed. Call inside tx. */
+function release(runId: number) {
+  for (const table of ['todos', 'reminders', 'events']) db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
+  db.prepare('UPDATE usage SET used = used - 1 WHERE (user_id, day) = (SELECT user_id, day FROM runs WHERE id = ?)').run(runId);
+  db.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run(runId);
+}
+
+/** Runs whose owner stopped renewing the lease died with their process; treat them as failed. Call inside tx. */
+function releaseExpired(userId: string) {
+  const expired = db.prepare("SELECT id FROM runs WHERE user_id = ? AND status = 'running' AND lease_until < ?").all(userId, now()) as { id: number }[];
+  for (const { id } of expired) release(id);
+}
+
+const owns = (runId: number, owner: string) => !!db.prepare("SELECT 1 FROM runs WHERE id = ? AND owner = ? AND status = 'running'").get(runId, owner);
+
 /**
  * Claims the idempotency key and charges one unit atomically.
  * A key that previously failed may be claimed again; done keys replay; running keys are busy.
  */
 export function reserve(user: User, idemKey: string): Reservation {
   return tx(() => {
+    releaseExpired(user.id);
     const day = localDay(user.tz);
+    const owner = randomUUID();
     const claimed = db
       .prepare(
-        `INSERT INTO runs (user_id, idem_key, day, status) VALUES (?, ?, ?, 'running')
-         ON CONFLICT (user_id, idem_key) DO UPDATE SET status = 'running', day = excluded.day WHERE status = 'failed'
+        `INSERT INTO runs (user_id, idem_key, day, status, owner, lease_until) VALUES (?, ?, ?, 'running', ?, ?)
+         ON CONFLICT (user_id, idem_key) DO UPDATE SET status = 'running', day = excluded.day, owner = excluded.owner, lease_until = excluded.lease_until
+         WHERE status = 'failed'
          RETURNING id`,
       )
-      .get(user.id, idemKey, day) as { id: number } | undefined;
+      .get(user.id, idemKey, day, owner, leaseUntil()) as { id: number } | undefined;
     if (!claimed) {
       const run = db.prepare('SELECT status, result FROM runs WHERE user_id = ? AND idem_key = ?').get(user.id, idemKey) as { status: string; result: string | null };
       return run.status === 'done' ? { kind: 'replay', result: JSON.parse(run.result!) } : { kind: 'busy' };
@@ -111,14 +134,19 @@ export function reserve(user: User, idemKey: string): Reservation {
          ON CONFLICT (user_id, day) DO UPDATE SET used = used + 1 WHERE :limit IS NULL OR used < :limit`,
       )
       .run({ limit }, user.id, day);
-    if (charged.changes === 1) return { kind: 'run', runId: claimed.id };
+    if (charged.changes === 1) return { kind: 'run', runId: claimed.id, owner };
     db.prepare('DELETE FROM runs WHERE id = ?').run(claimed.id);
     return { kind: 'quota', used: usedOn(user.id, day), limit: limit! };
   });
 }
 
-export function finish(user: User, runId: number, text: string, result: Omit<RunResult, 'noteId'>): RunResult {
+export function renewLease(runId: number, owner: string) {
+  db.prepare("UPDATE runs SET lease_until = ? WHERE id = ? AND owner = ? AND status = 'running'").run(leaseUntil(), runId, owner);
+}
+
+export function finish(user: User, runId: number, owner: string, text: string, result: Omit<RunResult, 'noteId'>): RunResult {
   return tx(() => {
+    if (!owns(runId, owner)) throw new Error(`run ${runId} lease expired before it finished`);
     const note =
       result.mode === 'note'
         ? (db.prepare('INSERT INTO notes (user_id, run_id, text, summary, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id').get(user.id, runId, text, result.reply, now()) as { id: number })
@@ -129,12 +157,10 @@ export function finish(user: User, runId: number, text: string, result: Omit<Run
   });
 }
 
-/** Failed run: refund the unit and undo every action the agent took during it. */
-export function fail(runId: number) {
+/** Failed run: refund the unit and undo its actions, unless the lease already passed to someone else. */
+export function fail(runId: number, owner: string) {
   tx(() => {
-    for (const table of ['todos', 'reminders', 'events']) db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(runId);
-    db.prepare('UPDATE usage SET used = used - 1 WHERE (user_id, day) = (SELECT user_id, day FROM runs WHERE id = ?)').run(runId);
-    db.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run(runId);
+    if (owns(runId, owner)) release(runId);
   });
 }
 
@@ -182,6 +208,7 @@ export function searchHistory(userId: string, query: string) {
 }
 
 export function userState(user: User) {
+  tx(() => releaseExpired(user.id));
   const q = (sql: string) => db.prepare(sql).all(user.id);
   return {
     user: { ...user, used: usedOn(user.id, localDay(user.tz)), limit: limitOf(user) },

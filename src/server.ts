@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { runAgent } from './agent.ts';
-import { ensureUser, reserve, finish, fail, userState, getEvent, type Mode, type User } from './db.ts';
+import { ensureUser, reserve, finish, fail, renewLease, userState, getEvent, RUN_LEASE_MS, type Mode, type User } from './db.ts';
 
 const INDEX_HTML = readFileSync(new URL('../public/index.html', import.meta.url));
 const MAX_TEXT = 4000;
@@ -35,6 +35,7 @@ function currentUser(req: IncomingMessage, url: URL): User {
 
 async function readBody(req: IncomingMessage) {
   let raw = '';
+  req.setEncoding('utf8');
   for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw || '{}');
   const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -51,19 +52,23 @@ async function handleRun(req: IncomingMessage, res: ServerResponse, user: User) 
   if (reservation.kind === 'busy') return sendJson(res, 409, { error: 'in_progress' });
 
   res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
+  res.flushHeaders();
   const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   if (reservation.kind === 'replay') {
     send('done', reservation.result);
     return res.end();
   }
-  const { runId } = reservation;
+  const { runId, owner } = reservation;
+  const heartbeat = setInterval(() => renewLease(runId, owner), RUN_LEASE_MS / 3);
   try {
     const out = await runAgent({ userId: user.id, tz: user.tz, runId, mode, now: new Date() }, text, (step) => send('step', step));
-    send('done', finish(user, runId, text, out));
+    send('done', finish(user, runId, owner, text, out));
   } catch (e) {
-    fail(runId);
+    fail(runId, owner);
     console.error(`run ${runId} failed:`, e);
     send('error', { message: (e as Error).message });
+  } finally {
+    clearInterval(heartbeat);
   }
   res.end();
 }
