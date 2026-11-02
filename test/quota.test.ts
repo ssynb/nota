@@ -81,3 +81,30 @@ test("quota resets at midnight in the user's timezone, not UTC", async () => {
   assert.ok(allowed.done);
   assert.equal(s.user.used, 1);
 });
+
+test('a run orphaned by a server crash is refunded and its idempotency key can be retried', async () => {
+  const user = newUser();
+  const idemKey = randomUUID();
+  const slowLlm = await startFakeLLM(3000);
+  const crashed = await startServer(db, slowLlm.url, '2026-11-02T04:00:00Z');
+  const res = await fetch(`${crashed.url}/api/runs`, {
+    method: 'POST',
+    headers: { 'x-user-id': user, 'x-timezone': 'Asia/Shanghai', 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '买牛奶', mode: 'note', idemKey }),
+  });
+  assert.equal(res.status, 200, 'the run was accepted and charged before the crash');
+  crashed.stop();
+  res.body?.cancel().catch(() => {});
+  slowLlm.close();
+
+  const restarted = await startServer(db, llm.url, '2026-11-02T04:02:00Z');
+  const refunded = await state(restarted.url, user);
+  const retry = await run(restarted.url, user, '买牛奶', { idemKey });
+  const s = await state(restarted.url, user);
+  restarted.stop();
+
+  assert.equal(refunded.user.used, 0);
+  assert.ok(retry.done);
+  assert.equal(s.user.used, 1);
+  assert.equal(s.notes.length, 1);
+});

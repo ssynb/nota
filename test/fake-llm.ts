@@ -45,6 +45,7 @@ function reply(messages: Msg[]): { status: number; message?: object } {
 export async function startFakeLLM(delayMs = 30) {
   const server = createServer(async (req, res) => {
     let body = '';
+    req.setEncoding('utf8');
     for await (const chunk of req) body += chunk;
     const { messages } = JSON.parse(body) as { messages: Msg[] };
     await new Promise((r) => setTimeout(r, delayMs));

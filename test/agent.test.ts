@@ -1,7 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startFakeLLM } from './fake-llm.ts';
-import { startServer, tempDb, run, state, newUser } from './support.ts';
+import { request } from 'node:http';
+import { startServer, tempDb, run, state, newUser, TZ } from './support.ts';
 
 let llm: Awaited<ReturnType<typeof startFakeLLM>>;
 let server: Awaited<ReturnType<typeof startServer>>;
@@ -42,4 +43,20 @@ test('a question about history is answered from past notes via search_history (t
   assert.match(r.done.reply, /预算评审会/);
   assert.doesNotMatch(r.done.reply, /爬山/);
   assert.equal(r.done.noteId, null);
+});
+
+test('Chinese text split mid-character across HTTP chunks is stored intact', async () => {
+  const user = newUser();
+  const body = Buffer.from(JSON.stringify({ text: '买牛奶', mode: 'note', idemKey: 'chunked-1' }));
+  const cut = body.indexOf(Buffer.from('买')) + 1;
+  await new Promise<void>((resolve, reject) => {
+    const req = request(`${server.url}/api/runs`, { method: 'POST', headers: { 'x-user-id': user, 'x-timezone': TZ, 'content-type': 'application/json' } }, (res) => {
+      res.resume().on('end', resolve);
+    });
+    req.on('error', reject);
+    req.write(body.subarray(0, cut));
+    setImmediate(() => req.end(body.subarray(cut)));
+  });
+  const s = await state(server.url, user);
+  assert.equal(s.notes[0].text, '买牛奶');
 });
