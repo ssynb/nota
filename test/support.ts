@@ -1,4 +1,5 @@
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { after } from 'node:test';
 import { createInterface } from 'node:readline';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,11 @@ export function env(db: string, llmUrl: string) {
   return { ...process.env, DB_PATH: db, LLM_BASE_URL: llmUrl, LLM_API_KEY: 'test', LLM_MODEL: 'fake', PORT: '0' };
 }
 
+// A failed startup can reject before the caller holds a handle to its sibling servers;
+// killing every spawned child here keeps a failing run from hanging on their open pipes.
+const children = new Set<ChildProcess>();
+after(() => children.forEach((c) => c.kill()));
+
 /** Spawns a real server process; resolves once it prints its URL. */
 export async function startServer(db: string, llmUrl: string, now?: string) {
   const child = spawn(process.execPath, ['--import', './test/clock.ts', 'src/server.ts'], {
@@ -21,6 +27,8 @@ export async function startServer(db: string, llmUrl: string, now?: string) {
     env: { ...env(db, llmUrl), TEST_NOW: now ?? '' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
+  children.add(child);
+  child.once('exit', () => children.delete(child));
   const url = await new Promise<string>((resolve, reject) => {
     child.once('exit', (code) => reject(new Error(`server exited early: ${code}`)));
     createInterface({ input: child.stdout }).on('line', (line) => {
