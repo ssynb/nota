@@ -61,7 +61,7 @@ async function handleRun(req: IncomingMessage, res: ServerResponse, user: User) 
   const { runId, owner } = reservation;
   const heartbeat = setInterval(() => renewLease(runId, owner), RUN_LEASE_MS / 3);
   try {
-    const out = await runAgent({ userId: user.id, tz: user.tz, runId, mode, now: new Date() }, text, (step) => send('step', step));
+    const out = await runAgent({ userId: user.id, runId, owner, tz: user.tz, mode, now: new Date() }, text, (step) => send('step', step));
     send('done', finish(user, runId, owner, text, out));
   } catch (e) {
     fail(runId, owner);

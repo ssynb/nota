@@ -1,6 +1,6 @@
 // Hand-written OpenAI-compatible function-calling loop: the model decides which tools to call.
 import * as store from './db.ts';
-import type { Mode, Step } from './db.ts';
+import { LeaseLostError, type Lease, type Mode, type Step } from './db.ts';
 
 const LLM_BASE_URL = process.env.LLM_BASE_URL ?? 'https://api.deepseek.com';
 const LLM_MODEL = process.env.LLM_MODEL ?? 'deepseek-flash';
@@ -11,7 +11,7 @@ const MAX_TURNS = 8;
 const LLM_TIMEOUT_MS = 120_000;
 const DEFAULT_EVENT_MS = 60 * 60 * 1000;
 
-export type AgentContext = { userId: string; tz: string; runId: number; mode: Mode; now: Date };
+export type AgentContext = Lease & { tz: string; mode: Mode; now: Date };
 type Args = Record<string, string | undefined>;
 type ToolCall = { id: string; function: { name: string; arguments: string } };
 type Message = { role: string; content?: string | null; tool_calls?: ToolCall[]; [k: string]: unknown };
@@ -73,22 +73,22 @@ function systemPrompt(ctx: AgentContext) {
 const TOOL_IMPLS: Record<string, (ctx: AgentContext, a: Args) => object> = {
   create_todo: (ctx, a) => {
     const due = a.due ? parseTime(a.due, 'due') : null;
-    return { ok: true, id: store.addTodo(ctx.userId, ctx.runId, a.title!, due).id, due: due && localTime(due, ctx.tz) };
+    return { ok: true, id: store.addTodo(ctx, a.title!, due).id, due: due && localTime(due, ctx.tz) };
   },
   set_reminder: (ctx, a) => {
     const at = parseTime(a.remind_at, 'remind_at');
-    return { ok: true, id: store.addReminder(ctx.userId, ctx.runId, a.content!, at).id, remind_at: localTime(at, ctx.tz) };
+    return { ok: true, id: store.addReminder(ctx, a.content!, at).id, remind_at: localTime(at, ctx.tz) };
   },
   create_calendar_event: (ctx, a) => {
     const start = parseTime(a.start, 'start');
     const end = a.end ? parseTime(a.end, 'end') : new Date(Date.parse(start) + DEFAULT_EVENT_MS).toISOString();
-    const { id } = store.addEvent(ctx.userId, ctx.runId, { title: a.title!, start, end, location: a.location ?? null });
+    const { id } = store.addEvent(ctx, { title: a.title!, start, end, location: a.location ?? null });
     return { ok: true, id, start: localTime(start, ctx.tz), end: localTime(end, ctx.tz) };
   },
   search_history: (ctx, a) => ({ results: store.searchHistory(ctx.userId, a.query ?? '').map((r) => ({ ...r, at: localTime(r.at, ctx.tz) })) }),
 };
 
-/** Tool errors go back to the model so it can correct its arguments; they do not fail the run. */
+/** Tool errors go back to the model so it can correct its arguments; only a lost lease fails the run. */
 function execute(ctx: AgentContext, call: ToolCall): Step {
   const tool = call.function.name;
   let args: Args = {};
@@ -98,6 +98,7 @@ function execute(ctx: AgentContext, call: ToolCall): Step {
     if (!impl) throw new Error(`未知工具 ${tool}`);
     return { tool, args, result: impl(ctx, args) };
   } catch (e) {
+    if (e instanceof LeaseLostError) throw e;
     return { tool, args, result: { error: (e as Error).message } };
   }
 }

@@ -68,13 +68,27 @@ function tx<T>(fn: () => T): T {
   }
 }
 
-// Several processes may open a fresh file at once. Schema creation runs under the write lock, where the busy
-// timeout applies; the WAL switch comes after and is persistent, so later opens find it already set.
-tx(() => db.exec(SCHEMA));
-db.exec('PRAGMA journal_mode = WAL');
-
 const now = () => new Date().toISOString();
 const leaseUntil = () => new Date(Date.now() + RUN_LEASE_MS).toISOString();
+
+/**
+ * Databases created before run leases lack owner/lease_until. Their running rows have no owner that could still
+ * finish them, so they get an already-expired lease and are released (refund + undo) once, on next access.
+ */
+function migrate() {
+  const columns = (db.prepare('PRAGMA table_info(runs)').all() as { name: string }[]).map((c) => c.name);
+  if (columns.includes('lease_until')) return;
+  db.exec('ALTER TABLE runs ADD COLUMN owner TEXT; ALTER TABLE runs ADD COLUMN lease_until TEXT;');
+  db.prepare("UPDATE runs SET lease_until = ? WHERE status = 'running'").run(new Date(0).toISOString());
+}
+
+// Several processes may open a fresh file at once. Schema creation and migration run under the write lock, where
+// the busy timeout applies; the WAL switch comes after and is persistent, so later opens find it already set.
+tx(() => {
+  db.exec(SCHEMA);
+  migrate();
+});
+db.exec('PRAGMA journal_mode = WAL');
 
 /** Calendar date (YYYY-MM-DD) of `at` in the user's timezone; the quota day key. */
 export const localDay = (tz: string, at = new Date()) => at.toLocaleDateString('sv-SE', { timeZone: tz });
@@ -104,7 +118,14 @@ function releaseExpired(userId: string) {
   for (const { id } of expired) release(id);
 }
 
-const owns = (runId: number, owner: string) => !!db.prepare("SELECT 1 FROM runs WHERE id = ? AND owner = ? AND status = 'running'").get(runId, owner);
+/** Proof that the holder still owns a running run; every write made on the run's behalf must present it. */
+export type Lease = { userId: string; runId: number; owner: string };
+
+/** The run was released or taken over; the holder must stop and leave everything to the current owner. */
+export class LeaseLostError extends Error {}
+
+const OWNED = "EXISTS (SELECT 1 FROM runs WHERE id = :runId AND owner = :owner AND status = 'running')";
+const owns = (runId: number, owner: string) => (db.prepare(`SELECT ${OWNED} AS owned`).get({ runId, owner }) as { owned: number }).owned === 1;
 
 /**
  * Claims the idempotency key and charges one unit atomically.
@@ -146,7 +167,7 @@ export function renewLease(runId: number, owner: string) {
 
 export function finish(user: User, runId: number, owner: string, text: string, result: Omit<RunResult, 'noteId'>): RunResult {
   return tx(() => {
-    if (!owns(runId, owner)) throw new Error(`run ${runId} lease expired before it finished`);
+    if (!owns(runId, owner)) throw new LeaseLostError(`run ${runId} lease lost before it finished`);
     const note =
       result.mode === 'note'
         ? (db.prepare('INSERT INTO notes (user_id, run_id, text, summary, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id').get(user.id, runId, text, result.reply, now()) as { id: number })
@@ -167,19 +188,25 @@ export function fail(runId: number, owner: string) {
 const usedOn = (userId: string, day: string) =>
   (db.prepare('SELECT used FROM usage WHERE user_id = ? AND day = ?').get(userId, day) as { used: number } | undefined)?.used ?? 0;
 
-export function addTodo(userId: string, runId: number, title: string, dueAt: string | null) {
-  return db.prepare('INSERT INTO todos (user_id, run_id, title, due_at, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id').get(userId, runId, title, dueAt, now()) as { id: number };
+/** Inserts an action row only while the lease is held; the ownership check and the write are one statement. */
+function insertOwned(table: string, lease: Lease, values: Record<string, string | null>) {
+  const columns = Object.keys(values);
+  const row = db
+    .prepare(
+      `INSERT INTO ${table} (user_id, run_id, created_at, ${columns.join(', ')})
+       SELECT :userId, :runId, :createdAt, ${columns.map((c) => `:${c}`).join(', ')} WHERE ${OWNED} RETURNING id`,
+    )
+    .get({ userId: lease.userId, runId: lease.runId, owner: lease.owner, createdAt: now(), ...values }) as { id: number } | undefined;
+  if (!row) throw new LeaseLostError(`run ${lease.runId} lease lost; ${table} not written`);
+  return row;
 }
 
-export function addReminder(userId: string, runId: number, content: string, remindAt: string) {
-  return db.prepare('INSERT INTO reminders (user_id, run_id, content, remind_at, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id').get(userId, runId, content, remindAt, now()) as { id: number };
-}
+export const addTodo = (lease: Lease, title: string, dueAt: string | null) => insertOwned('todos', lease, { title, due_at: dueAt });
 
-export function addEvent(userId: string, runId: number, e: { title: string; start: string; end: string; location: string | null }) {
-  return db
-    .prepare('INSERT INTO events (user_id, run_id, title, start_at, end_at, location, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id')
-    .get(userId, runId, e.title, e.start, e.end, e.location, now()) as { id: number };
-}
+export const addReminder = (lease: Lease, content: string, remindAt: string) => insertOwned('reminders', lease, { content, remind_at: remindAt });
+
+export const addEvent = (lease: Lease, e: { title: string; start: string; end: string; location: string | null }) =>
+  insertOwned('events', lease, { title: e.title, start_at: e.start, end_at: e.end, location: e.location });
 
 export function getEvent(userId: string, id: number) {
   return db.prepare('SELECT * FROM events WHERE user_id = ? AND id = ?').get(userId, id) as

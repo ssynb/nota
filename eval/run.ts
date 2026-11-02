@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'nota-eval-')), 'eval.db');
-const { db, ensureUser } = await import('../src/db.ts');
+const { db, ensureUser, reserve } = await import('../src/db.ts');
 const { runAgent, localTime } = await import('../src/agent.ts');
 type Step = import('../src/db.ts').Step;
 
@@ -36,13 +36,14 @@ function judge(c: Case, steps: Step[], reply: string): string[] {
 
 async function evaluate(c: Case, i: number) {
   const userId = `eval-${i}`;
-  ensureUser(userId, suite.tz);
+  const reservation = reserve(ensureUser(userId, suite.tz), 'eval');
+  if (reservation.kind !== 'run') throw new Error(`eval user ${userId} could not reserve a run: ${reservation.kind}`);
   for (const text of c.history ?? []) {
     db.prepare('INSERT INTO notes (user_id, run_id, text, summary, created_at) VALUES (?, 0, ?, ?, ?)').run(userId, text, text, new Date(NOW.getTime() - 86_400_000).toISOString());
   }
   const started = Date.now();
   try {
-    const out = await runAgent({ userId, tz: suite.tz, runId: i + 1, mode: c.mode ?? 'note', now: NOW }, c.input, () => {});
+    const out = await runAgent({ userId, runId: reservation.runId, owner: reservation.owner, tz: suite.tz, mode: c.mode ?? 'note', now: NOW }, c.input, () => {});
     return { c, steps: out.steps, reply: out.reply, problems: judge(c, out.steps, out.reply), ms: Date.now() - started };
   } catch (e) {
     return { c, steps: [], reply: '', problems: [`运行失败：${(e as Error).message}`], ms: Date.now() - started };
