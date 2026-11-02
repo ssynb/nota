@@ -9,7 +9,10 @@ const { runAgent, localTime } = await import('../src/agent.ts');
 type Step = import('../src/db.ts').Step;
 
 type Expectation = { tool: string; args?: Record<string, string> };
-type Case = { id: string; input: string; mode?: 'note' | 'ask'; history?: string[]; expect: Expectation[]; forbid?: string[]; reply?: string };
+/** History entries default to one day before `now`; `daysAgo` orders entries whose recency matters. */
+type HistoryEntry = string | { text: string; daysAgo: number };
+/** `reply` patterns must all match. */
+type Case = { id: string; input: string; mode?: 'note' | 'ask'; history?: HistoryEntry[]; expect: Expectation[]; forbid?: string[]; reply?: string | string[] };
 const suite = JSON.parse(readFileSync(new URL('cases.json', import.meta.url), 'utf8')) as { now: string; tz: string; cases: Case[] };
 
 const MIN_PASS_RATE = 0.8;
@@ -30,7 +33,7 @@ function judge(c: Case, steps: Step[], reply: string): string[] {
     .filter((e) => !ok.some((s) => s.tool === e.tool && Object.entries(e.args ?? {}).every(([k, v]) => argMatches(k, v, (s.args as Record<string, unknown>)[k]))))
     .map((e) => `缺少 ${e.tool} ${JSON.stringify(e.args ?? {})}`);
   for (const tool of c.forbid ?? []) if (steps.some((s) => s.tool === tool)) problems.push(`不应调用 ${tool}`);
-  if (c.reply && !new RegExp(c.reply).test(reply)) problems.push(`回复不含 /${c.reply}/`);
+  for (const pattern of [c.reply ?? []].flat()) if (!new RegExp(pattern).test(reply)) problems.push(`回复不含 /${pattern}/`);
   return problems;
 }
 
@@ -38,8 +41,9 @@ async function evaluate(c: Case, i: number) {
   const userId = `eval-${i}`;
   const reservation = reserve(ensureUser(userId, suite.tz), 'eval');
   if (reservation.kind !== 'run') throw new Error(`eval user ${userId} could not reserve a run: ${reservation.kind}`);
-  for (const text of c.history ?? []) {
-    db.prepare('INSERT INTO notes (user_id, run_id, text, summary, created_at) VALUES (?, 0, ?, ?, ?)').run(userId, text, text, new Date(NOW.getTime() - 86_400_000).toISOString());
+  for (const entry of c.history ?? []) {
+    const { text, daysAgo } = typeof entry === 'string' ? { text: entry, daysAgo: 1 } : entry;
+    db.prepare('INSERT INTO notes (user_id, run_id, text, summary, created_at) VALUES (?, 0, ?, ?, ?)').run(userId, text, text, new Date(NOW.getTime() - daysAgo * 86_400_000).toISOString());
   }
   const started = Date.now();
   try {
