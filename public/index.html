@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nota · AI 语音便签</title>
+<style>
+  :root { --fg:#1d1d1f; --muted:#6e6e73; --line:#e5e5ea; --accent:#2f6fed; --bg:#fafafa; font-family: -apple-system, "PingFang SC", system-ui, sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--fg); }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; }
+  h1 { font-size:22px; margin:0; } h2 { font-size:15px; margin:28px 0 8px; color:var(--muted); font-weight:600; }
+  #quota { color:var(--muted); font-size:14px; }
+  textarea { width:100%; box-sizing:border-box; min-height:96px; margin-top:16px; padding:12px; font:inherit; font-size:16px; border:1px solid var(--line); border-radius:10px; resize:vertical; background:#fff; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  button { font:inherit; font-size:15px; padding:8px 16px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #mic.on { background:#e5484d; color:#fff; border-color:#e5484d; }
+  #live { margin-top:16px; }
+  .step { font-size:13px; padding:8px 10px; border-left:3px solid var(--accent); background:#fff; margin-bottom:6px; border-radius:4px; white-space:pre-wrap; word-break:break-all; }
+  .step.err { border-color:#e5484d; }
+  .reply { padding:12px; background:#fff; border:1px solid var(--line); border-radius:10px; white-space:pre-wrap; }
+  .error { color:#e5484d; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:6px; font-size:14px; }
+  li small { color:var(--muted); display:block; margin-top:2px; }
+  .empty { color:var(--muted); font-size:14px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Nota</h1><span id="quota"></span></header>
+  <textarea id="text" placeholder="说一段话或直接输入，例如：下周三下午三点和小王开预算评审会，提醒我前一天准备好报表"></textarea>
+  <div class="row">
+    <button id="mic" title="语音输入（Chrome）">🎤 语音</button>
+    <span style="flex:1"></span>
+    <button id="ask">问历史</button>
+    <button id="note" class="primary">整理并执行</button>
+  </div>
+  <section id="live"></section>
+
+  <h2>待办</h2><ul id="todos"></ul>
+  <h2>提醒</h2><ul id="reminders"></ul>
+  <h2>日程</h2><ul id="events"></ul>
+  <h2>笔记</h2><ul id="notes"></ul>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const userId = localStorage.nota_uid ??= crypto.randomUUID();
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const headers = { 'x-user-id': userId, 'x-timezone': tz };
+const fmt = (iso) => new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
+const TOOL_NAMES = { create_todo: '新建待办', set_reminder: '设置提醒', create_calendar_event: '创建日程', search_history: '检索历史' };
+
+function el(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+function item(title, sub, link) {
+  const li = el('li', title);
+  if (sub) li.append(el('small', sub));
+  if (link) { const a = el('a', '下载 .ics'); a.href = link; li.querySelector('small')?.append(' · ', a); }
+  return li;
+}
+function fill(id, rows, render) { $(id).replaceChildren(...(rows.length ? rows.map(render) : [el('li', '暂无', 'empty')])); }
+
+const scheduled = new Set();
+function scheduleReminder(r) {
+  const ms = Date.parse(r.remind_at) - Date.now();
+  if (ms <= 0 || ms > 2 ** 31 - 1 || scheduled.has(r.id)) return;
+  scheduled.add(r.id);
+  setTimeout(() => (window.Notification?.permission === 'granted' ? new Notification('Nota 提醒', { body: r.content }) : alert(`提醒：${r.content}`)), ms);
+}
+
+async function refresh() {
+  const s = await (await fetch('/api/state', { headers })).json();
+  const u = s.user;
+  $('quota').textContent = u.plan === 'pro' ? `Pro · 今日已用 ${u.used} 次` : `Free · 今日 ${u.used}/${u.limit} 次`;
+  fill('todos', s.todos, (t) => item(t.title, t.due_at && `截止 ${fmt(t.due_at)}`));
+  fill('reminders', s.reminders, (r) => (scheduleReminder(r), item(r.content, fmt(r.remind_at))));
+  fill('events', s.events, (e) => item(e.title, `${fmt(e.start_at)} – ${fmt(e.end_at)}${e.location ? ' · ' + e.location : ''}`, `/api/events/${e.id}.ics?uid=${userId}`));
+  fill('notes', s.notes, (n) => item(n.summary, `${fmt(n.created_at)} · 原文：${n.text}`));
+}
+
+// One idempotency key per submission; kept after a network failure so a retry is charged once.
+let pending = null;
+async function submit(mode) {
+  const text = $('text').value.trim();
+  if (!text) return;
+  if (!pending || pending.text !== text || pending.mode !== mode) pending = { text, mode, idemKey: crypto.randomUUID() };
+  const live = $('live');
+  live.replaceChildren(el('div', mode === 'ask' ? '正在检索历史…' : 'Agent 处理中…', 'empty'));
+  for (const b of [$('note'), $('ask')]) b.disabled = true;
+  try {
+    const res = await fetch('/api/runs', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(pending) });
+    if (!res.ok) {
+      const body = await res.json();
+      if (res.status !== 409) pending = null;
+      live.replaceChildren(el('div', res.status === 429 ? `今日免费额度已用完（${body.used}/${body.limit}），明天再来` : res.status === 409 ? '这条请求仍在处理中，请稍候再试' : body.error, 'error'));
+      return;
+    }
+    await readEvents(res, live);
+  } catch (e) {
+    live.append(el('div', `网络中断：${e.message}。再次点击会复用同一请求，不会重复扣次`, 'error'));
+  } finally {
+    for (const b of [$('note'), $('ask')]) b.disabled = false;
+    refresh();
+  }
+}
+
+async function readEvents(res, live) {
+  live.replaceChildren();
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const event = block.match(/^event: (.*)$/m)[1];
+      const data = JSON.parse(block.match(/^data: (.*)$/m)[1]);
+      onEvent(event, data, live);
+    }
+  }
+}
+
+function onEvent(event, data, live) {
+  if (event === 'step') {
+    const failed = data.result?.error;
+    live.append(el('div', `${failed ? '✗' : '✓'} ${TOOL_NAMES[data.tool] ?? data.tool}  ${JSON.stringify(data.args)}\n→ ${JSON.stringify(data.result)}`, failed ? 'step err' : 'step'));
+  } else if (event === 'done') {
+    if (live.childElementCount === 0) data.steps.forEach((s) => onEvent('step', s, live));
+    live.append(el('div', data.reply, 'reply'));
+    pending = null;
+    if (data.mode === 'note') $('text').value = '';
+  } else if (event === 'error') {
+    live.append(el('div', `处理失败，本次不计次：${data.message}`, 'error'));
+  }
+}
+
+$('note').onclick = () => submit('note');
+$('ask').onclick = () => submit('ask');
+
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!Recognition) { $('mic').disabled = true; $('mic').title = '当前浏览器不支持语音识别，请用 Chrome 或直接输入'; }
+let rec = null;
+$('mic').onclick = () => {
+  if (rec) return rec.stop();
+  window.Notification?.requestPermission();
+  rec = new Recognition();
+  rec.lang = 'zh-CN'; rec.continuous = true; rec.interimResults = true;
+  const before = $('text').value;
+  rec.onresult = (e) => { $('text').value = before + Array.from(e.results, (r) => r[0].transcript).join(''); };
+  rec.onend = () => { rec = null; $('mic').classList.remove('on'); $('mic').textContent = '🎤 语音'; };
+  rec.start();
+  $('mic').classList.add('on'); $('mic').textContent = '■ 停止';
+};
+
+refresh();
+</script>
+</body>
+</html>
