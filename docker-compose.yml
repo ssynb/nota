@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: nota
+      POSTGRES_PASSWORD: nota
+      POSTGRES_DB: nota
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "nota"]
+      interval: 2s
+      retries: 30
+volumes:
+  pgdata:

@@ -1,0 +1,36 @@
+{
+ "now": "2026-11-02T10:00:00+08:00",
+ "tz": "Asia/Shanghai",
+ "note": "history 是预置的纪要（days_ago 天前）；cite 要求答案引用到的对话（用 key 指代），only=true 时不得引用其他对话",
+ "cases": [
+  {"id": "报价要求", "question": "张总对报价有什么要求？",
+   "history": [
+    {"key": "zhang", "days_ago": 6, "title": "和张总谈合作", "speakers": ["我", "A"], "facts": [["A", "张总希望报价控制在15万以内"], ["我", "我方先按这个范围准备方案"]]},
+    {"key": "hike", "days_ago": 2, "title": "周末爬山", "speakers": ["我"], "facts": [["我", "周末去爬山，很累"]]}],
+   "reply": ["15 ?万|十五万"], "cite": ["zhang"], "only": true},
+  {"id": "物品位置", "question": "我的护照放哪了",
+   "history": [
+    {"key": "passport", "days_ago": 30, "title": "收拾证件", "speakers": ["我"], "facts": [["我", "护照放在书房第二个抽屉里了"]]},
+    {"key": "keys", "days_ago": 5, "title": "车钥匙", "speakers": ["我"], "facts": [["我", "备用车钥匙在妈妈家"]]}],
+   "reply": ["抽屉"], "cite": ["passport"], "only": true},
+  {"id": "难·数字变化答最新并列出变化", "question": "张总那个项目的报价最后定在多少？",
+   "history": [
+    {"key": "p20", "days_ago": 20, "title": "张总项目初谈", "speakers": ["我", "A"], "facts": [["我", "项目报价 20 万"]]},
+    {"key": "p18", "days_ago": 10, "title": "张总压价", "speakers": ["我", "A"], "facts": [["A", "张总要求降价"], ["我", "报价调整到 18 万"]]},
+    {"key": "p16", "days_ago": 3, "title": "和张总敲定报价", "speakers": ["我", "A"], "facts": [["A", "最终敲定项目报价 16 万"]]}],
+   "reply": ["16 ?万|十六万", "20 ?万|18 ?万|二十万|十八万"], "cite": ["p16"]},
+  {"id": "难·按人和月份查", "question": "上个月跟李总谈的预算是多少？",
+   "history": [
+    {"key": "oct", "days_ago": 20, "title": "李总预算沟通", "speakers": ["我", "A"], "facts": [["A", "李总说今年预算 50 万"]]},
+    {"key": "nov", "days_ago": 1, "title": "李总追加预算", "speakers": ["我", "A"], "facts": [["A", "李总说追加到 60 万"]]}],
+   "reply": ["50 ?万|五十万"], "cite": ["oct"]},
+  {"id": "难·数字是谁说的", "question": "18 万这个报价是我提的还是对方提的？",
+   "history": [
+    {"key": "deal", "days_ago": 4, "title": "和王总谈报价", "speakers": ["我", "A"], "facts": [["我", "我方报价 18 万"], ["A", "王总希望降到 15 万"]]}],
+   "reply": ["你|您|本人"], "forbid_reply": "(?<!不)是(对方|王总)提的", "cite": ["deal"]},
+  {"id": "查无结果", "question": "我上次说的那家日料店叫什么？",
+   "history": [
+    {"key": "shoes", "days_ago": 3, "title": "买跑鞋", "speakers": ["我"], "facts": [["我", "买了一双新跑鞋"]]}],
+   "reply": ["没有|未|找不到|没找到|暂无"], "cite": [], "only": true}
+ ]
+}

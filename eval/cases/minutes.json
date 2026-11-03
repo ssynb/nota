@@ -1,0 +1,17 @@
+{
+ "note": "facts 期望：某条事实匹配 text 正则且 speaker_label 等于 speaker；另检查事实里的数字都在原文出现过（不编造）",
+ "cases": [
+  {"id": "报价谈判", "speakers": [["我", true], ["A", false]],
+   "lines": [["我", "我们这边报价二十万。"], ["A", "太高了，十八万我们能接受。"], ["我", "最低十六万，不能再低了。"], ["A", "好，就十六万，下周三签合同。"]],
+   "facts": [{"text": "20|二十", "speaker": "我"}, {"text": "18|十八", "speaker": "A"}, {"text": "签", "speaker": "A"}]},
+  {"id": "多人分工", "speakers": [["我", true], ["A", false], ["B", false]],
+   "lines": [["我", "设计稿周三前我来给。"], ["A", "测试环境我周四搭好。"], ["B", "预算我这边批五万。"]],
+   "facts": [{"text": "设计稿", "speaker": "我"}, {"text": "测试环境|周四", "speaker": "A"}, {"text": "5 ?万|五万", "speaker": "B"}]},
+  {"id": "时间地点", "speakers": [["我", true], ["A", false]],
+   "lines": [["A", "客户那边改到下周二上午十点见面。"], ["我", "地点还是望京SOHO吗？"], ["A", "对，望京SOHO塔三，二十层。"]],
+   "facts": [{"text": "10|十点", "speaker": "A"}, {"text": "望京", "speaker": "A"}]},
+  {"id": "闲聊不硬记", "speakers": [["我", true], ["A", false]],
+   "lines": [["A", "今天天气真不错。"], ["我", "是啊，阳光挺好的。"], ["A", "哈哈，适合出去走走。"]],
+   "facts": [], "max_facts": 1}
+ ]
+}

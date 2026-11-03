@@ -1,0 +1,328 @@
+{
+ "now": "2026-11-02T10:00:00+08:00",
+ "tz": "Asia/Shanghai",
+ "note": "set_reminder 已并入日程：remind_at = start - alarm_minutes_before；search_history 改为 find_notes",
+ "cases": [
+  {
+   "id": "明天早上提醒",
+   "input": "明天早上8点提醒我给妈妈打电话",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-03 08:00",
+      "title": "妈妈"
+     }
+    }
+   ]
+  },
+  {
+   "id": "下周三会议",
+   "input": "下周三下午三点和小王开预算评审会",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-11 15:00",
+      "title": "预算"
+     }
+    }
+   ]
+  },
+  {
+   "id": "周五聚餐地点",
+   "input": "周五晚上七点在海底捞和大学同学聚餐",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-06 19:00"
+     }
+    }
+   ]
+  },
+  {
+   "id": "购物清单只建待办",
+   "input": "记一下，要买牛奶、鸡蛋和面包",
+   "expect": [
+    {
+     "tool": "create_todo",
+     "args": {
+      "title": "牛奶"
+     }
+    },
+    {
+     "tool": "create_todo",
+     "args": {
+      "title": "面包"
+     }
+    }
+   ],
+   "forbid": [
+    "create_calendar_event"
+   ]
+  },
+  {
+   "id": "带截止时间的待办",
+   "input": "今天下午三点前要把季度报告发给老板",
+   "expect": [
+    {
+     "tool": "create_todo",
+     "args": {
+      "title": "报告",
+      "due": "2026-11-02 15:00"
+     }
+    }
+   ]
+  },
+  {
+   "id": "半小时后",
+   "input": "半小时后提醒我关火",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-02 10:30",
+      "title": "关火"
+     }
+    }
+   ]
+  },
+  {
+   "id": "两小时后",
+   "input": "两小时后提醒我去取快递",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-02 12:00",
+      "title": "快递"
+     }
+    }
+   ]
+  },
+  {
+   "id": "下月提前一天",
+   "input": "下个月1号交房租，提前一天提醒我",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-30",
+      "title": "房租"
+     }
+    }
+   ]
+  },
+  {
+   "id": "纯日记不动手",
+   "input": "今天心情不错，天气很好，中午在公园散了会儿步",
+   "expect": [],
+   "forbid": [
+    "create_calendar_event",
+    "create_todo"
+   ]
+  },
+  {
+   "id": "日程加前一晚提醒",
+   "input": "11月20号上午10点去医院复查，前一天晚上提醒我别吃夜宵",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-20 10:00"
+     }
+    },
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-19"
+     }
+    }
+   ]
+  },
+  {
+   "id": "后天电话会",
+   "input": "后天下午两点半跟客户开电话会议",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-04 14:30"
+     }
+    }
+   ]
+  },
+  {
+   "id": "周六日程和出门提醒",
+   "input": "这周六上午九点带孩子去打疫苗，提醒我早上八点出门",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-07 09:00"
+     }
+    },
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-07 08:00"
+     }
+    }
+   ]
+  },
+  {
+   "id": "明晚提前十分钟",
+   "input": "明晚8点看球赛，记得提前十分钟提醒我",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-03 19:50"
+     }
+    }
+   ]
+  },
+  {
+   "id": "口语语音转写",
+   "input": "嗯那个就是下周一早上九点半要开那个周会然后呃记得带上电脑",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-09 09:30",
+      "title": "周会"
+     }
+    }
+   ]
+  },
+  {
+   "id": "只说下午默认三点",
+   "input": "下周三下午提醒我交水电费",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-11 15:00",
+      "title": "水电"
+     }
+    }
+   ]
+  },
+  {
+   "id": "笔记引用历史",
+   "input": "按上次和李雷约好的方案截止日，截止前一天提醒我检查方案",
+   "expect": [
+    {
+     "tool": "find_notes"
+    },
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-14"
+     }
+    }
+   ],
+   "history": [
+    {
+     "text": "和李雷约定，合作方案的截止日是11月15日",
+     "days_ago": 1
+    }
+   ]
+  },
+  {
+   "id": "难·下下个月跨年",
+   "input": "下下个月5号提醒我续签房屋合同",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2027-01-05",
+      "title": "合同"
+     }
+    }
+   ]
+  },
+  {
+   "id": "难·明年日程",
+   "input": "明年1月3号上午十点去牙医那复诊",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2027-01-03 10:00",
+      "title": "牙"
+     }
+    }
+   ]
+  },
+  {
+   "id": "难·月底",
+   "input": "报销单月底前要交，月底那天提醒我一下",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-30",
+      "title": "报销"
+     }
+    }
+   ]
+  },
+  {
+   "id": "难·过两天",
+   "input": "过两天提醒我给物业打电话问暖气的事",
+   "expect": [
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-04",
+      "title": "物业|暖气"
+     }
+    }
+   ]
+  },
+  {
+   "id": "难·多人多事",
+   "input": "让小李周三前把设计稿发我，周四下午两点我要和老王一起过一遍稿子，周四中午提醒我订会议室",
+   "expect": [
+    {
+     "tool": "create_todo",
+     "args": {
+      "title": "设计稿"
+     }
+    },
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "start": "2026-11-05 14:00"
+     }
+    },
+    {
+     "tool": "create_calendar_event",
+     "args": {
+      "remind_at": "2026-11-05 12:00"
+     }
+    }
+   ]
+  },
+  {
+   "id": "难·否定不提醒",
+   "input": "明天的周会取消了，不用提醒我了",
+   "expect": [],
+   "forbid": [
+    "create_calendar_event",
+    "create_todo"
+   ]
+  },
+  {
+   "id": "难·闲聊不动手",
+   "input": "你觉得这个周末去哪儿玩比较好？",
+   "expect": [],
+   "forbid": [
+    "create_calendar_event",
+    "create_todo"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nota</title>
+<style>
+  :root { --fg:#1d1d1f; --muted:#6e6e73; --line:#e5e5ea; --accent:#2f6fed; --warn:#b26a00; --bad:#d93a3f; --bg:#f7f7f8;
+          font-family:-apple-system,"PingFang SC",system-ui,sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--fg); }
+  main { max-width:1080px; margin:0 auto; padding:20px 16px 64px; display:grid; grid-template-columns:1fr 340px; gap:20px; }
+  header { grid-column:1/-1; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:22px; margin:0; } h2 { font-size:14px; color:var(--muted); margin:22px 0 8px; font-weight:600; }
+  .quota { display:flex; gap:8px; flex-wrap:wrap; margin-left:auto; }
+  .pill { background:#fff; border:1px solid var(--line); border-radius:999px; padding:3px 10px; font-size:13px; color:var(--muted); }
+  .pill b { color:var(--fg); font-weight:600; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:8px; }
+  textarea, input, select { font:inherit; font-size:15px; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:#fff; box-sizing:border-box; }
+  textarea { width:100%; min-height:72px; resize:vertical; }
+  button { font:inherit; font-size:14px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.rec { background:var(--bad); color:#fff; border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:13px; }
+  .log { font-size:12.5px; max-height:260px; overflow:auto; }
+  .log div { padding:4px 0; border-bottom:1px dashed var(--line); word-break:break-all; }
+  .speaker { display:inline-block; font-size:12px; padding:1px 7px; border-radius:6px; background:#eef2ff; margin-right:4px; }
+  .speaker.me { background:#e6f6ec; }
+  .fact { font-size:14px; margin:4px 0; } .fact .t { color:var(--muted); font-size:12px; margin-left:6px; }
+  .status { font-size:12px; padding:1px 8px; border-radius:6px; background:#f0f0f2; }
+  .status.wait { background:#fff4e0; color:var(--warn); } .status.done { background:#e6f6ec; } .status.bad { background:#fdeaea; color:var(--bad); }
+  .answer { white-space:pre-wrap; }
+  .cite { color:var(--accent); cursor:pointer; font-size:13px; margin-right:8px; }
+  ul { list-style:none; padding:0; margin:0; }
+  @media (max-width:860px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Nota</h1><span class="muted" id="who"></span>
+    <div class="quota">
+      <span class="pill">本月语音 <b id="q-min">–</b></span>
+      <span class="pill">今日录音 <b id="q-rec">–</b></span>
+      <span class="pill">本月提问 <b id="q-ask">–</b></span>
+    </div>
+  </header>
+
+  <section>
+    <div class="card">
+      <div class="row" style="margin-top:0">
+        <button id="rec" class="primary">● 开始录音</button>
+        <span class="muted" id="rec-info">浏览器麦克风录音，按 10 秒分片上传；停止后处理</span>
+      </div>
+      <textarea id="text" placeholder="或者直接输入一段话，例如：下周三下午三点和张总开预算评审会，提前一天提醒我，再告诉张总一声" style="margin-top:10px"></textarea>
+      <div class="row"><button id="send">整理并办事</button></div>
+    </div>
+
+    <h2>处理动态</h2>
+    <div class="card log" id="log"><div class="muted">提交后这里实时显示处理状态和 Agent 的每一步</div></div>
+
+    <h2>纪要</h2>
+    <div id="conversations"></div>
+
+    <h2>问历史</h2>
+    <div class="card">
+      <div class="row" style="margin-top:0"><input id="q" placeholder="例如：上个月张总的报价是多少？" style="flex:1"><button id="ask">提问</button></div>
+      <div id="answer" class="log" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <aside>
+    <h2>动作（手机执行）</h2><ul id="actions"></ul>
+    <h2>待办</h2><ul id="todos"></ul>
+    <h2>画像（可编辑）</h2><ul id="profile"></ul>
+    <h2>声纹</h2>
+    <div class="card">
+      <div class="muted" id="vp-state"></div>
+      <div class="row"><button id="vp">读一段话注册（12 秒）</button></div>
+      <div class="muted" style="margin-top:6px">朗读示例：我是这台设备的主人，现在录一段声音用来注册声纹，请记住我说话的声音特点。</div>
+    </div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const uid = localStorage.nota_uid ??= crypto.randomUUID();
+const headers = { 'x-user-id': uid, 'x-timezone': Intl.DateTimeFormat().resolvedOptions().timeZone };
+const RATE = 16000, CHUNK_SECONDS = 10;
+const STATUS = { recording:'录音中', uploading:'上传中', transcribing:'转写中', summarizing:'整理中', done:'完成', failed:'失败', paused_quota:'额度已用完，录音已保存，额度恢复后自动整理' };
+const ACTION = { pending:['等待手机执行','wait'], pending_confirmation:['等你确认','wait'], done:['手机已执行','done'], failed:['执行失败','bad'], rejected:['已拒绝',''] };
+const TOOL = { create_calendar_event:'建日程', create_todo:'建待办', share_message:'起草消息', find_notes:'查纪要', get_profile:'查画像' };
+
+function el(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+const api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
+const fmt = (iso) => new Date(iso).toLocaleString('zh-CN', { month:'numeric', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit' });
+const ahead = (m) => m === 0 ? '到点提醒' : m % 1440 === 0 ? `提前 ${m / 1440} 天提醒` : m % 60 === 0 ? `提前 ${m / 60} 小时提醒` : `提前 ${m} 分钟提醒`;
+const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function log(text, cls) { const box = $('log'); if (box.firstChild?.classList?.contains('muted')) box.replaceChildren(); box.prepend(el('div', text, cls)); }
+
+// ---------- state ----------
+function renderQuota(q) {
+  const lim = (x) => x.limit == null ? '不限' : x.limit;
+  $('q-min').textContent = `${q.minutes.used}/${lim(q.minutes)} 分钟`;
+  $('q-rec').textContent = `${q.recordings_today.used}/${lim(q.recordings_today)} 次`;
+  $('q-ask').textContent = `${q.asks.used}/${lim(q.asks)} 次`;
+}
+
+function renderConversation(c) {
+  const card = el('div', null, 'card'); card.id = `c-${c.id}`;
+  card.append(el('div', c.title || '（无标题）'), el('div', `${fmt(c.started_at)}`, 'muted'));
+  const sp = el('div'); sp.style.margin = '6px 0';
+  c.speakers.forEach((s) => sp.append(el('span', s.is_owner ? `${s.label}（本人）` : `说话人 ${s.label}`, s.is_owner ? 'speaker me' : 'speaker')));
+  card.append(sp, el('div', c.overview || '', 'fact'));
+  c.facts.forEach((f) => { const d = el('div', `· ${f.text}`, 'fact'); d.append(el('span', `${f.speaker_label ?? '?'} · ${mmss(f.offset_seconds)}`, 't')); card.append(d); });
+  if (c.todos.length) card.append(el('div', '待办：' + c.todos.map((t) => t.text).join('；'), 'muted'));
+  return card;
+}
+
+function renderAction(a) {
+  const li = el('li', null, 'card');
+  const desc = a.type === 'create_calendar_event' ? `日程：${a.args.title} · ${fmt(a.args.start)}${a.args.alarm_minutes_before != null ? ` · ${ahead(a.args.alarm_minutes_before)}` : ''}`
+    : a.type === 'share_message' ? `发给 ${a.args.to}：${a.args.text}` : `删除日程 ${a.args.system_event_id}`;
+  const [label, cls] = ACTION[a.status] ?? [a.status, ''];
+  li.append(el('div', desc), el('span', label, `status ${cls}`));
+  const row = el('div', null, 'row');
+  const act = (verb) => async () => { await api(`/api/actions/${a.id}/${verb}`, { method:'POST' }); refresh(); };
+  if (a.status === 'pending_confirmation') { const ok = el('button', '确认'); ok.onclick = act('confirm'); const no = el('button', '拒绝'); no.onclick = act('reject'); row.append(ok, no); }
+  if (a.status === 'done' && a.type === 'create_calendar_event') { const u = el('button', '撤销'); u.onclick = act('undo'); row.append(u); }
+  if (row.childElementCount) li.append(row);
+  return li;
+}
+
+function renderProfileItem(p) {
+  const li = el('li', null, 'card profile');
+  const cat = el('select'); ['person','background','preference','ongoing'].forEach((c) => { const o = el('option', { person:'人物', background:'背景', preference:'偏好', ongoing:'近期' }[c]); o.value = c; cat.append(o); }); cat.value = p.category;
+  const input = el('textarea'); input.value = p.content; input.maxLength = 200; input.style.minHeight = '48px';
+  const save = el('button', '保存'); save.onclick = async () => { const r = await api(`/api/profile/${p.id}`, { method:'PUT', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ category: cat.value, content: input.value }) }); if (!r.ok) alert((await r.json()).detail); refresh(); };
+  const del = el('button', '删除'); del.onclick = async () => { await api(`/api/profile/${p.id}`, { method:'DELETE' }); refresh(); };
+  const row = el('div', null, 'row'); row.append(cat, save, del);
+  li.append(input, row);
+  return li;
+}
+
+const fill = (id, items, render, empty) => $(id).replaceChildren(...(items.length ? items.map(render) : [el('div', empty, 'muted')]));
+let refreshing = null;
+function refresh() {
+  clearTimeout(refreshing);
+  refreshing = setTimeout(async () => {
+    const s = await (await api('/api/state')).json();
+    $('who').textContent = `${s.user.plan === 'pro' ? 'Pro' : 'Free'} · ${s.user.timezone}`;
+    renderQuota(s.quota);
+    fill('conversations', s.conversations, renderConversation, '还没有纪要');
+    fill('actions', s.actions.slice().reverse(), renderAction, '暂无');
+    fill('todos', s.todos, (t) => el('li', t.text + (t.due_at ? `（${fmt(t.due_at)} 前）` : ''), 'card'), '暂无');
+    fill('profile', s.profile, renderProfileItem, '对话整理后自动学习');
+    $('vp-state').textContent = s.voiceprint_enrolled ? '已注册：纪要里会标出你本人' : '未注册：纪要不标注本人';
+  }, 150);
+}
+
+// ---------- event stream ----------
+async function readSSE(res, onEvent) {
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += value;
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const ev = block.match(/^event: (.*)$/m), data = block.match(/^data: (.*)$/m);
+      if (ev && data) onEvent(ev[1], JSON.parse(data[1]));
+    }
+  }
+}
+
+async function subscribe() {
+  for (;;) {
+    try {
+      const res = await api('/api/stream');
+      refresh();
+      await readSSE(res, (event, d) => {
+        if (event === 'recording') log(`录音 ${d.recording_id.slice(0, 8)}：${STATUS[d.status] ?? d.status}${d.error ? `（${d.error}）` : ''}`, d.status === 'failed' ? 'status bad' : '');
+        else if (event === 'step') log(`Agent → ${TOOL[d.tool] ?? d.tool} ${JSON.stringify(d.args)} ⇒ ${JSON.stringify(d.result).slice(0, 160)}`);
+        else if (event === 'quota') renderQuota(d);
+        if (event !== 'step') refresh();
+      });
+    } catch (e) { /* reconnect below */ }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+// ---------- audio ----------
+function wav(samples) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, RATE, true); v.setUint32(28, RATE * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  samples.forEach((s, i) => v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 0x7fff, true));
+  return new Blob([buf], { type:'audio/wav' });
+}
+
+function resample(input, from) {
+  if (from === RATE) return input;
+  const out = new Float32Array(Math.floor(input.length * RATE / from));
+  for (let i = 0; i < out.length; i++) out[i] = input[Math.floor(i * from / RATE)];
+  return out;
+}
+
+/** Captures mono 16 kHz samples; calls onSamples with Float32Arrays until stop() resolves. */
+async function capture(onSamples) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true } });
+  const ctx = new AudioContext({ sampleRate: RATE });
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  node.onaudioprocess = (e) => onSamples(resample(new Float32Array(e.inputBuffer.getChannelData(0)), ctx.sampleRate));
+  src.connect(node); node.connect(ctx.destination);
+  return async () => { node.disconnect(); src.disconnect(); stream.getTracks().forEach((t) => t.stop()); await ctx.close(); };
+}
+
+async function putChunk(rid, seq, blob) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await api(`/api/recordings/${rid}/chunks/${seq}`, { method:'PUT', headers:{ 'content-type':'audio/wav' }, body: blob });
+      if (r.ok) return;
+      if (r.status < 500) throw new Error(`分片 ${seq} 被拒：${(await r.json()).detail}`);
+    } catch (e) { if (attempt >= 5 || e.message.startsWith('分片')) throw e; }
+    await new Promise((res) => setTimeout(res, 1000 * 2 ** attempt));
+  }
+}
+
+let recording = null;
+$('rec').onclick = async () => {
+  if (recording) return recording.stop();
+  const rid = crypto.randomUUID();
+  const started = await (await api('/api/recordings', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ recording_id: rid, started_at: new Date().toISOString() }) })).json();
+  if (started.ai === 'paused_quota') log('今日录音次数已用完：照常录音保存，额度恢复后自动整理', 'status wait');
+  const chunks = []; let pending = [], pendingLen = 0, uploads = Promise.resolve();
+  const flush = () => {
+    if (!pendingLen) return;
+    const all = new Float32Array(pendingLen); let o = 0; pending.forEach((p) => { all.set(p, o); o += p.length; });
+    const seq = chunks.length, blob = wav(all); chunks.push(blob); pending = []; pendingLen = 0;
+    uploads = uploads.then(() => putChunk(rid, seq, blob)).catch((e) => log(e.message, 'status bad'));
+  };
+  const stopCapture = await capture((s) => { pending.push(s); pendingLen += s.length; if (pendingLen >= RATE * CHUNK_SECONDS) flush(); });
+  const t0 = Date.now(); const timer = setInterval(() => { $('rec-info').textContent = `录音中 ${mmss((Date.now() - t0) / 1000)} · 已传 ${chunks.length} 片`; }, 500);
+  $('rec').textContent = '■ 停止'; $('rec').className = 'rec';
+  recording = { stop: async () => {
+    recording = null; clearInterval(timer); await stopCapture(); flush(); await uploads;
+    $('rec').textContent = '● 开始录音'; $('rec').className = 'primary'; $('rec-info').textContent = `已上传 ${chunks.length} 片，等待处理`;
+    for (let round = 0; round < 3; round++) {
+      const { missing } = await (await api(`/api/recordings/${rid}/finish`, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ total_chunks: chunks.length }) })).json();
+      if (!missing.length) return;
+      for (const seq of missing) await putChunk(rid, seq, chunks[seq]);
+    }
+  } };
+};
+
+$('send').onclick = async () => {
+  const text = $('text').value.trim(); if (!text) return;
+  $('send').disabled = true;
+  try {
+    const r = await api('/api/notes/text', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ idem_key: crypto.randomUUID(), text }) });
+    if (r.ok) $('text').value = '';
+  } finally { $('send').disabled = false; }
+};
+
+$('ask').onclick = async () => {
+  const question = $('q').value.trim(); if (!question) return;
+  const box = $('answer'); box.replaceChildren(el('div', '检索中…', 'muted'));
+  const r = await api('/api/ask', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ idem_key: crypto.randomUUID(), question }) });
+  if (r.status === 429) return box.replaceChildren(el('div', '本月提问次数已用完', 'status bad'));
+  box.replaceChildren();
+  await readSSE(r, (event, d) => {
+    if (event === 'step') box.append(el('div', `→ ${TOOL[d.tool] ?? d.tool} ${JSON.stringify(d.args)} ⇒ ${d.result.results ? d.result.results.length + ' 条' : JSON.stringify(d.result).slice(0, 120)}`));
+    if (event === 'error') box.append(el('div', `提问失败，本次不计次：${d.message}`, 'status bad'));
+    if (event === 'answer') {
+      const a = el('div', d.text, 'answer'); a.style.fontSize = '14px'; box.append(a);
+      const cites = el('div');
+      d.citations.forEach((c, i) => { const s = el('span', `出处 ${i + 1}：${fmt(c.started_at)} ${mmss(c.offset_seconds)}`, 'cite'); s.onclick = () => document.getElementById(`c-${c.conversation_id}`)?.scrollIntoView({ behavior:'smooth' }); cites.append(s); });
+      box.append(cites);
+    }
+  });
+};
+
+$('vp').onclick = async () => {
+  const parts = []; let n = 0;
+  const stop = await capture((s) => { parts.push(s); n += s.length; });
+  $('vp').disabled = true;
+  for (let s = 12; s > 0; s--) { $('vp').textContent = `请朗读… ${s}`; await new Promise((r) => setTimeout(r, 1000)); }
+  await stop();
+  const all = new Float32Array(n); let o = 0; parts.forEach((p) => { all.set(p, o); o += p.length; });
+  const r = await api('/api/voiceprint', { method:'POST', headers:{ 'content-type':'audio/wav' }, body: wav(all) });
+  $('vp').disabled = false; $('vp').textContent = '读一段话注册（12 秒）';
+  if (!r.ok) alert((await r.json()).detail);
+  refresh();
+};
+
+subscribe();
+</script>
+</body>
+</html>
