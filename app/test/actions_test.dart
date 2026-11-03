@@ -35,7 +35,7 @@ class FakeCalendar implements DeviceCalendar {
 
 class FakeSharer implements Sharer {
   FakeSharer(this.userSends);
-  final bool userSends;
+  bool userSends;
   final shared = <String>[];
 
   @override
@@ -132,13 +132,46 @@ void main() {
     expect(server.results['d2']?['ok'], false);
   });
 
-  test('发消息动作打开分享面板带上收件人与正文，用户取消则回报失败', () async {
+  test('发消息动作不会自动弹分享面板，等用户点继续发送', () async {
+    server.pending.add(
+      action('s1', 'share_message', {'to': '张总', 'text': '周三三点见'}),
+    );
+    final sharer = FakeSharer(true);
+    await ActionRunner(server.api(), calendar, sharer, prefs).runPending();
+
+    expect(sharer.shared, isEmpty);
+    expect(server.results, isEmpty);
+  });
+
+  test('继续发送：取消面板保持待发送可再发；发完只回报一次，重启后再点不重开面板', () async {
     final msg = action('s1', 'share_message', {'to': '张总', 'text': '周三三点见'});
     server.pending.add(msg);
     final sharer = FakeSharer(false);
-    await ActionRunner(server.api(), calendar, sharer, prefs).runPending();
+    final first = ActionRunner(server.api(), calendar, sharer, prefs);
 
+    await first.sendShare(msg);
     expect(sharer.shared.single, allOf(contains('张总'), contains('周三三点见')));
+    expect(server.results, isEmpty);
+
+    sharer.userSends = true;
+    await Future.wait([first.sendShare(msg), first.sendShare(msg)]);
+    expect(sharer.shared, hasLength(2));
+    expect(server.results['s1'], {'ok': true});
+
+    await ActionRunner(server.api(), calendar, sharer, prefs).sendShare(msg);
+    expect(sharer.shared, hasLength(2));
+  });
+
+  test('放弃发送回报失败，且不再打开分享面板', () async {
+    final msg = action('s1', 'share_message', {'to': '张总', 'text': '周三三点见'});
+    server.pending.add(msg);
+    final sharer = FakeSharer(true);
+    final runner = ActionRunner(server.api(), calendar, sharer, prefs);
+
+    await runner.abandonShare('s1');
+    await runner.sendShare(msg);
+
     expect(server.results['s1']?['ok'], false);
+    expect(sharer.shared, isEmpty);
   });
 }
