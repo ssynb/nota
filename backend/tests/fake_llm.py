@@ -5,6 +5,9 @@ Which call it is follows from the request: tools offered (agent vs ask) or the s
   评审会   -> agent calls create_calendar_event + create_todo + share_message
   #fail / 失败案例 -> HTTP 500 on every call for that material (the second one can be spoken)
   #slow    -> the summary call takes SLOW_SECONDS
+  #busy    -> like DeepSeek under load: 200 headers at once, then only keep-alive blank lines, never a body
+  #null    -> 200 with the body `null`
+  #loop    -> the agent asks for get_profile on every turn, each turn taking LOOP_TURN_SECONDS
 Like DeepSeek thinking mode, follow-ups that drop reasoning_content are rejected.
 """
 import json
@@ -14,6 +17,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SLOW_SECONDS = 8
+LOOP_TURN_SECONDS = 1
+BUSY = object()
 LINE = re.compile(r"^\[(\d+):(\d+)\] ([^：]+)：(.*)$", re.M)
 
 
@@ -68,9 +73,16 @@ def respond(body):
     material = "\n".join(m.get("content") or "" for m in messages if m["role"] == "user")
     if "#fail" in material or "失败案例" in material:
         return 500, {"error": {"message": "fake failure"}}
+    if "#busy" in material:
+        return 200, BUSY
+    if "#null" in material:
+        return 200, None
     if any(m["role"] == "assistant" and m.get("tool_calls") and not m.get("reasoning_content") for m in messages):
         return 400, {"error": {"message": "reasoning_content must be passed back"}}
     tools = {t["function"]["name"] for t in body.get("tools", [])}
+    if "#loop" in material and tools:
+        time.sleep(LOOP_TURN_SECONDS)
+        return 200, {"choices": [{"index": 0, "message": _tool_turn([("get_profile", {})]), "finish_reason": "tool_calls"}]}
     if "create_todo" in tools:
         message = _agent(messages, material)
     elif "find_notes" in tools:
@@ -90,6 +102,18 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         status, payload = respond(body)
+        if payload is BUSY:
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            try:
+                for _ in range(600):
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    time.sleep(0.5)
+            except OSError:
+                pass
+            return
         data = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
