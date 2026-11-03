@@ -9,6 +9,19 @@ const _channel = MethodChannel('nota/device');
 Future<String> deviceTimezone() async =>
     (await _channel.invokeMethod<String>('timezone'))!;
 
+Future<void> openAppSettings() => _channel.invokeMethod('openSettings');
+
+/// 申请通知权限（用于 App 在后台时提醒待确认动作）。
+Future<void> requestNotifications() =>
+    _channel.invokeMethod('requestNotifications');
+
+/// 发一条本地通知；同一 [id] 重复发送会替换旧的。
+Future<void> notify(String id, String title, String body) =>
+    _channel.invokeMethod('notify', {'id': id, 'title': title, 'body': body});
+
+Future<void> clearNotification(String id) =>
+    _channel.invokeMethod('clearNotification', {'id': id});
+
 /// iOS EventKit 日历，实现在 ios/Runner/AppDelegate.swift。
 class EventKitCalendar implements DeviceCalendar {
   @override

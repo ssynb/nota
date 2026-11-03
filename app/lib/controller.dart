@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'actions.dart';
@@ -9,6 +10,7 @@ import 'api.dart';
 import 'device.dart';
 import 'identity.dart';
 import 'recorder.dart';
+import 'ui/format.dart';
 import 'uploader.dart';
 
 const defaultBaseUrl = String.fromEnvironment(
@@ -138,11 +140,25 @@ class NotaController extends ChangeNotifier {
         if (id != null) _live(id).steps.add(data);
       case 'action':
         if (data['status'] == 'pending') unawaited(runner.runPending());
+        _notifyIfAway(data);
         unawaited(refresh());
       case 'conversation' || 'quota':
         unawaited(refresh());
     }
     notifyListeners();
+  }
+
+  /// App 在后台（如锁屏录音中）时，用本地通知提醒有动作等待确认；处理过后收回通知。
+  void _notifyIfAway(Map<String, dynamic> action) {
+    final id = action['id'] as String;
+    if (action['status'] != 'pending_confirmation') {
+      unawaited(clearNotification(id));
+      return;
+    }
+    final life = WidgetsBinding.instance.lifecycleState;
+    if (life == AppLifecycleState.resumed) return;
+    final (title, detail) = describeAction(action);
+    unawaited(notify(id, '待确认：$title', detail));
   }
 
   LiveRecording _live(String id) => live.putIfAbsent(id, LiveRecording.new);
@@ -174,6 +190,8 @@ class NotaController extends ChangeNotifier {
   }
 
   Future<void> startRecording() async {
+    // 录音时 App 常在后台，此时有待确认动作要靠通知提醒。
+    unawaited(requestNotifications());
     final s = await RecordingSession.start(uploader, chunkSeconds);
     session = s;
     _live(s.id);

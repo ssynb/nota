@@ -1,6 +1,7 @@
 import EventKit
 import Flutter
 import UIKit
+import UserNotifications
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -21,7 +22,8 @@ import UIKit
   }
 }
 
-/// 系统时区与 EventKit 日历读写，对应 lib/device.dart。
+/// 系统时区、EventKit 日历读写、本地通知，对应 lib/device.dart。
+/// 权限都在第一次真正用到时申请：日历在第一次执行日历动作时，通知在第一次开始录音时。
 final class NotaDevice {
   private let store = EKEventStore()
 
@@ -34,6 +36,24 @@ final class NotaDevice {
       withCalendarAccess(result) { try self.createEvent(args) }
     case "deleteEvent":
       withCalendarAccess(result) { try self.deleteEvent(args["id"] as! String) }
+    case "openSettings":
+      UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+      result(nil)
+    case "requestNotifications":
+      UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+        DispatchQueue.main.async { result(granted) }
+      }
+    case "notify":
+      let content = UNMutableNotificationContent()
+      content.title = args["title"] as! String
+      content.body = args["body"] as! String
+      content.sound = .default
+      let id = args["id"] as! String
+      UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+      result(nil)
+    case "clearNotification":
+      UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [args["id"] as! String])
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -43,7 +63,7 @@ final class NotaDevice {
     store.requestFullAccessToEvents { granted, error in
       DispatchQueue.main.async {
         guard granted else {
-          result(FlutterError(code: "calendar_denied", message: error?.localizedDescription ?? "未授权访问日历", details: nil))
+          result(FlutterError(code: "calendar_denied", message: "未授权日历：请在 设置 > 隐私与安全性 > 日历 中允许 Nota 完全访问", details: nil))
           return
         }
         do {

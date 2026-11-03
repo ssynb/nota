@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../controller.dart';
+import '../device.dart';
 import 'format.dart';
 
 class ActionsPage extends StatelessWidget {
@@ -120,12 +121,14 @@ class _ActionTile extends StatelessWidget {
       subtitle: Text(
         [
           detail,
-          '${actionStatusLabel[status] ?? status}${error == null ? '' : '：$error'}',
+          '${actionStatusLabel[status] ?? status}${error == null ? '' : '：${actionErrorLabel[error] ?? error}'}',
         ].join('\n'),
         style: TextStyle(color: status == 'failed' ? scheme.error : null),
       ),
       isThreeLine: true,
-      trailing: canUndo
+      trailing: error == 'calendar_denied'
+          ? TextButton(onPressed: openAppSettings, child: const Text('去设置'))
+          : canUndo
           ? TextButton(
               onPressed: () => _call(context, () => c.undo(a['id'] as String)),
               child: const Text('撤销'),

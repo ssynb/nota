@@ -53,11 +53,11 @@
 		<true/>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Nota 用麦克风录下会议和语音便签，上传后生成纪要与待办。</string>
+	<string>Nota 用麦克风录下会议和语音便签，上传到你的 Nota 账户生成纪要与待办。只在你点开始录音后才录。</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Nota 把会议里约定的日程写进你的系统日历，并在你撤销时删除它。</string>
+	<string>Nota 把对话里约定的日程写进系统日历并挂上提醒；你撤销时要按日程 ID 找到并删除它，所以需要完全访问。Nota 不读取你的其他日程。</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Nota 把会议里约定的日程写进你的系统日历，并在你撤销时删除它。</string>
+	<string>Nota 把对话里约定的日程写进系统日历并挂上提醒；你撤销时要按日程 ID 找到并删除它，所以需要完全访问。Nota 不读取你的其他日程。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

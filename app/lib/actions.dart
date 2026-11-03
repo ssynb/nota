@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
@@ -117,6 +118,9 @@ class ActionRunner {
         default:
           return (ok: false, systemId: null, error: 'unsupported_type');
       }
+    } on PlatformException catch (e) {
+      // 回报系统给的错误码（如 calendar_denied），界面据此引导用户去设置。
+      return (ok: false, systemId: null, error: e.code);
     } catch (e) {
       return (ok: false, systemId: null, error: e.toString());
     }

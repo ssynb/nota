@@ -20,6 +20,14 @@ const actionStatusLabel = {
   'rejected': '已拒绝',
 };
 
+const actionErrorLabel = {
+  'calendar_denied': '未授权日历，请在设置中允许 Nota 完全访问日历',
+  'calendar_failed': '写入系统日历失败',
+  'event_not_found': '日历里已找不到这条日程',
+  'user_cancelled': '你取消了分享',
+  'unsupported_type': '手机不支持执行此类动作',
+};
+
 String two(int n) => n.toString().padLeft(2, '0');
 
 /// ISO 8601 → 本地时间“11月3日 09:30”。
