@@ -8,6 +8,8 @@ Which call it is follows from the request: tools offered (agent vs ask) or the s
   #busy    -> like DeepSeek under load: 200 headers at once, then only keep-alive blank lines, never a body
   #null    -> 200 with the body `null`
   #due     -> the agent creates a todo whose due is a bare date
+  #profile503  -> the profile call answers 503 the first time for that material, then works
+  #profilefail -> the profile call always answers 503
   #loop    -> the agent asks for get_profile on every turn, each turn taking LOOP_TURN_SECONDS
 Like DeepSeek thinking mode, follow-ups that drop reasoning_content are rejected.
 """
@@ -20,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 SLOW_SECONDS = 8
 LOOP_TURN_SECONDS = 1
 BUSY = object()
+_profile_calls: dict[str, int] = {}
 LINE = re.compile(r"^\[(\d+):(\d+)\] ([^：]+)：(.*)$", re.M)
 
 
@@ -95,6 +98,9 @@ def respond(body):
             time.sleep(SLOW_SECONDS)
         message = {"role": "assistant", "content": json.dumps(_summary(material), ensure_ascii=False)}
     elif "画像" in system:
+        _profile_calls[material] = _profile_calls.get(material, 0) + 1
+        if "#profilefail" in material or ("#profile503" in material and _profile_calls[material] == 1):
+            return 503, {"error": {"message": "Service is too busy"}}
         message = {"role": "assistant", "content": json.dumps({"items": [{"category": "person", "content": "张总：预算评审会参会人"}], "deletes": []}, ensure_ascii=False)}
     else:
         return 400, {"error": {"message": "unrecognised call"}}
