@@ -21,11 +21,11 @@ cd app
 flutter pub get
 open -a Simulator
 flutter run -d <模拟器 ID> \
-  --dart-define=NOTA_API=http://127.0.0.1:8000 \
+  --dart-define=NOTA_API=http://127.0.0.1:8077 \
   --dart-define=NOTA_CHUNK_SECONDS=15
 ```
 
-两个 `--dart-define` 都可省略（默认 `http://127.0.0.1:8000`、60 秒），运行后也能在“设置”页修改。模拟器的麦克风取 Mac 的系统输入（Simulator 菜单 Device > Sound > Sound Input）。ATS 只放开本地网络（`NSAllowsLocalNetworking`），连局域网外的 HTTP 地址需要改 `ios/Runner/Info.plist`。
+两个 `--dart-define` 都可省略（默认 `http://127.0.0.1:8077`（后端 start.sh 的默认端口）、60 秒），运行后也能在“设置”页修改。模拟器的麦克风取 Mac 的系统输入（Simulator 菜单 Device > Sound > Sound Input）。ATS 只放开本地网络（`NSAllowsLocalNetworking`），连局域网外的 HTTP 地址需要改 `ios/Runner/Info.plist`。
 
 ## 测试
 

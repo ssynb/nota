@@ -10,11 +10,13 @@ class ApiException implements Exception {
   final int status;
   final String body;
 
-  /// 契约里的错误码（如 `ask_quota`），响应体不是 `{error}` 时为 null。
-  String? get code {
+  /// 服务端给的原因：契约错误码（`{error}`，如 `ask_quota`）或 FastAPI 的 `{detail}`；都没有时为 null。
+  String? get reason {
     try {
       final decoded = jsonDecode(body);
-      return decoded is Map ? decoded['error']?.toString() : null;
+      return decoded is Map
+          ? (decoded['error'] ?? decoded['detail'])?.toString()
+          : null;
     } on FormatException {
       return null;
     }

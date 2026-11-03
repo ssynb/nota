@@ -15,7 +15,7 @@ import 'uploader.dart';
 
 const defaultBaseUrl = String.fromEnvironment(
   'NOTA_API',
-  defaultValue: 'http://127.0.0.1:8000',
+  defaultValue: 'http://127.0.0.1:8077',
 );
 const defaultChunkSeconds = int.fromEnvironment(
   'NOTA_CHUNK_SECONDS',

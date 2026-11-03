@@ -74,9 +74,9 @@ String minutesLabel(int minutes) {
 /// 把异常翻成给用户看的一句话。
 String errorText(Object e) {
   if (e is ApiException) {
-    return switch (e.code) {
+    return switch (e.reason) {
       'ask_quota' => '本月提问额度已用完',
-      final String code => code,
+      final String reason => reason,
       null => '服务器返回 ${e.status}：${e.body}',
     };
   }

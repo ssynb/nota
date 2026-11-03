@@ -71,8 +71,10 @@ class _TodoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListTile(
-    leading: const Icon(Icons.check_box_outline_blank),
-    title: Text('${t['title']}'),
+    leading: Icon(
+      t['done'] == true ? Icons.check_box : Icons.check_box_outline_blank,
+    ),
+    title: Text('${t['text']}'),
     subtitle: t['due_at'] == null
         ? null
         : Text('截止 ${dateTime(t['due_at'] as String)}'),
