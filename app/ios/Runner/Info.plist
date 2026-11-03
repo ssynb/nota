@@ -52,6 +52,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Nota 需要连接同一 Wi-Fi 下运行 Nota 服务的电脑，用来上传录音、接收纪要和待执行的动作。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Nota 用麦克风录下会议和语音便签，上传到你的 Nota 账户生成纪要与待办。只在你点开始录音后才录。</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>

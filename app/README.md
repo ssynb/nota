@@ -25,7 +25,17 @@ flutter run -d <模拟器 ID> \
   --dart-define=NOTA_CHUNK_SECONDS=15
 ```
 
-两个 `--dart-define` 都可省略（默认 `http://127.0.0.1:8077`（后端 start.sh 的默认端口）、60 秒），运行后也能在“设置”页修改：服务器地址重启 App 后生效，分片时长下次开始录音时生效。模拟器的麦克风取 Mac 的系统输入（Simulator 菜单 Device > Sound > Sound Input）。ATS 只放开本地网络（`NSAllowsLocalNetworking`），连局域网外的 HTTP 地址需要改 `ios/Runner/Info.plist`。
+两个 `--dart-define` 都可省略（默认 `http://127.0.0.1:8077`（后端 start.sh 的默认端口）、60 秒），运行后也能在“设置”页修改：服务器地址重启 App 后生效，分片时长下次开始录音时生效。模拟器的麦克风取 Mac 的系统输入（Simulator 菜单 Device > Sound > Sound Input）。
+
+### 装到真机
+
+手机和 Mac 连同一 Wi-Fi，后端监听 `0.0.0.0`。Bundle ID 为 `com.ssynb.nota`，在 Xcode 用 Apple ID（免费 Personal Team 即可）开启自动签名后：
+
+```sh
+flutter run --release -d <设备 UDID> --dart-define=NOTA_API=http://<Mac 局域网 IP>:8077
+```
+
+首次打开前要在手机“设置 > 通用 > VPN 与设备管理”里信任开发者证书；首次联网时 iOS 会询问是否允许 Nota 访问本地网络，需要允许。App 的 HTTP 走 Dart 自己的 socket，不受 ATS 约束；真机上拦局域网访问的是“本地网络”权限（`NSLocalNetworkUsageDescription`）。
 
 ## 测试
 
