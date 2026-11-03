@@ -174,4 +174,22 @@ void main() {
     expect(server.results['s1']?['ok'], false);
     expect(sharer.shared, isEmpty);
   });
+
+  test('回报失败后不靠新事件也会自动重试补报', () async {
+    server.pending.add(action('a1', 'create_calendar_event', dinner));
+    server.failResults = true;
+    final r = runner();
+    await r.runPending();
+    expect(server.results, isEmpty);
+
+    server.failResults = false;
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    while (server.results.isEmpty && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    r.dispose();
+
+    expect(server.results['a1'], {'ok': true, 'system_id': 'EK-1'});
+    expect(calendar.created, 1);
+  });
 }

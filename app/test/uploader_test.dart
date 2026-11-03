@@ -56,4 +56,23 @@ void main() {
     expect(server.finishCalls, ['r2', 'r2']);
     expect(dir.listSync(recursive: true).whereType<File>(), isEmpty);
   });
+
+  test('录音中途 App 被杀：重启后按本地已存分片收尾 finish，录音不悬空', () async {
+    server.online = false;
+    final killed = ChunkUploader(server.api(), dir);
+    await killed.start('r3', DateTime.utc(2026, 11, 3, 9));
+    await killed.addChunk('r3', 0, chunk(0));
+    await killed.addChunk('r3', 1, chunk(1));
+    killed.dispose();
+
+    server.online = true;
+    final restarted = ChunkUploader(server.api(), dir);
+    await restarted.finishInterrupted();
+    await restarted.sync();
+    restarted.dispose();
+
+    expect(server.chunks['r3'], {0: chunk(0), 1: chunk(1)});
+    expect(server.finishCalls, ['r3']);
+    expect(dir.listSync(recursive: true).whereType<File>(), isEmpty);
+  });
 }
