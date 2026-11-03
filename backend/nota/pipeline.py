@@ -1,12 +1,33 @@
-"""One job = one recording: assemble chunks → VAD → charge speech minutes → SenseVoice + CAM++ →
-split at long silences → per conversation: minutes, agent, profile. Every step's result is a checkpoint
-written under the job lease, so a retry or a takeover resumes where the last owner stopped."""
+"""One job per recording, run again whenever audio arrives (Part A T7: transcribe while recording).
+
+Each run takes the contiguous prefix of chunks that is not yet transcribed, VADs it, and transcribes
+the utterances that are certainly complete; speech touching the end of what has arrived is left for
+the next chunk (or finish), so a chunk boundary never cuts a sentence. Speech is charged per batch.
+When 120 seconds of silence follow the last utterance, the open conversation closes and gets its
+minutes, agent run and profile update right away, while the recording goes on.
+
+Every result is a checkpoint written under the job lease (see jobs.Lease.owned): a retry or a
+takeover resumes where the last owner stopped, and a superseded owner cannot write anything.
+"""
 import uuid
 
 import numpy as np
 
-from nota import agent, conversations, db, events, jobs, memory, quota, speech, state
+from nota import (
+    agent,
+    config,
+    conversations,
+    db,
+    events,
+    jobs,
+    memory,
+    quota,
+    speech,
+    state,
+)
 from nota.recordings import read_wav
+
+TAIL_HOLD = speech.MERGE_GAP  # speech ending this close to the end of the received audio may continue
 
 
 def _publish_status(conn, rec, status, **extra):
@@ -21,44 +42,123 @@ def _load(lease):
     return rec, user
 
 
-def _samples(rec) -> np.ndarray:
+def _prefix(rec) -> tuple[list[dict], bool]:
+    """Chunks 0..k-1 that have all arrived, with their start offsets; and whether that is the whole recording."""
     with db.tx() as conn:
-        rows = conn.execute("SELECT audio FROM chunks WHERE recording_id = %s ORDER BY seq", (rec["id"],)).fetchall()
+        rows = conn.execute("SELECT seq, duration_seconds FROM chunks WHERE recording_id = %s ORDER BY seq", (rec["id"],)).fetchall()
+    prefix, offset = [], 0.0
+    for expected, row in enumerate(rows):
+        if row["seq"] != expected:
+            break
+        prefix.append({"seq": row["seq"], "start": offset, "end": offset + row["duration_seconds"]})
+        offset += row["duration_seconds"]
+    complete = rec["total_chunks"] is not None and len(prefix) == rec["total_chunks"]
+    return prefix, complete
+
+
+def _audio(rec, chunks: list[dict]) -> np.ndarray:
+    with db.tx() as conn:
+        rows = conn.execute(
+            "SELECT audio FROM chunks WHERE recording_id = %s AND seq = ANY(%s) ORDER BY seq", (rec["id"], [c["seq"] for c in chunks])
+        ).fetchall()
     return speech.pcm_to_float(b"".join(read_wav(bytes(r["audio"])) for r in rows))
 
 
-def _transcribe(lease, rec, user) -> bool:
-    """Returns False when speech minutes are exhausted and AI work pauses."""
+def _owner_voice(user):
+    with db.tx() as conn:
+        row = conn.execute("SELECT embedding FROM voiceprints WHERE user_id = %s", (user["id"],)).fetchone()
+    return np.array(row["embedding"], dtype=np.float32) if row else None
+
+
+def _pause(lease, rec, seconds):
+    with db.tx() as conn:
+        lease.owned(conn)
+        conn.execute("UPDATE recordings SET ai = 'paused_quota', pause_reason = 'minutes', pending_seconds = %s WHERE id = %s", (seconds, rec["id"]))
+        _publish_status(conn, rec, "paused_quota")
+        jobs.done(conn, lease)
+
+
+def _transcribe_new_audio(lease, rec, user) -> bool | None:
+    """Transcribes the newly arrived prefix. Returns None if paused by quota, else whether the whole
+    recording has now been transcribed."""
+    prefix, complete = _prefix(rec)
+    cursor = rec["cursor_seconds"]
+    window = [c for c in prefix if c["end"] > cursor]
+    window_end = prefix[-1]["end"] if prefix else 0.0
+    if not window:
+        if complete:  # everything was transcribed before finish arrived: close what is still open
+            with db.tx() as conn:
+                lease.owned(conn)
+                _close_conversations(conn, rec, window_end, True)
+        return complete
     with db.tx() as conn:
         lease.owned(conn)
         _publish_status(conn, rec, "transcribing")
-    samples = _samples(rec)
-    segments = rec["vad_segments"]
-    if segments is None:
-        segments = speech.vad(samples)
-        with db.tx() as conn:
-            lease.owned(conn)
+    samples = _audio(rec, window)
+    base = window[0]["start"]
+    samples = samples[int((cursor - base) * speech.RATE) :]
+    segments = [(cursor + a, cursor + b) for a, b in speech.vad(samples)]
+    if complete:
+        final, new_cursor = segments, window_end
+    else:
+        final = [s for s in segments if s[1] <= window_end - TAIL_HOLD]
+        held = segments[len(final) :]
+        new_cursor = held[0][0] if held else window_end
+    seconds = speech.speech_seconds(final)
+    with db.tx() as conn:
+        room = quota.has_room(conn, user, seconds)
+    if not room:  # do not spend transcription on audio that cannot be charged
+        _pause(lease, rec, seconds)
+        return None
+    utterances = speech.transcribe_spans(samples, cursor, speech.utterances(final))
+    with db.tx() as conn:
+        lease.owned(conn)
+        current = conn.execute("SELECT cursor_seconds, clusters FROM recordings WHERE id = %s", (rec["id"],)).fetchone()
+        if not quota.charge_minutes(conn, user, rec["id"], seconds):
+            raise _NoRoom(seconds)
+        previous = conn.execute(
+            "SELECT cluster FROM utterances WHERE recording_id = %s ORDER BY idx DESC LIMIT 1", (rec["id"],)
+        ).fetchone()
+        clusters_of, clusters = speech.assign_clusters([u["embedding"] for u in utterances], current["clusters"], previous["cluster"] if previous else None)
+        count = conn.execute("SELECT count(*) AS n FROM utterances WHERE recording_id = %s", (rec["id"],)).fetchone()["n"]
+        for i, (u, k) in enumerate(zip(utterances, clusters_of)):
             conn.execute(
-                "UPDATE recordings SET vad_segments = %s, speech_seconds = %s WHERE id = %s",
-                (db.json(segments), speech.speech_seconds(segments), rec["id"]),
+                "INSERT INTO utterances (recording_id, idx, start_seconds, end_seconds, text, cluster) VALUES (%s, %s, %s, %s, %s, %s)",
+                (rec["id"], count + i, u["start"], u["end"], u["text"], k),
             )
-    with db.tx() as conn:
-        lease.owned(conn)
-        if not quota.charge_minutes(conn, user, rec["id"], speech.speech_seconds(segments)):
-            conn.execute("UPDATE recordings SET ai = 'paused_quota', pause_reason = 'minutes' WHERE id = %s", (rec["id"],))
-            _publish_status(conn, rec, "paused_quota")
-            jobs.done(conn, lease)
-            return False
+        conn.execute("UPDATE recordings SET cursor_seconds = %s, clusters = %s WHERE id = %s", (new_cursor, db.json(clusters), rec["id"]))
+        _close_conversations(conn, rec, new_cursor, complete)
         quota.publish(conn, user)
-        voice = conn.execute("SELECT embedding FROM voiceprints WHERE user_id = %s", (user["id"],)).fetchone()
-    owner = np.array(voice["embedding"], dtype=np.float32) if voice else None
-    utterances = speech.transcribe_recording(samples, [tuple(s) for s in segments], owner)
-    with db.tx() as conn:
-        lease.owned(conn)
-        conn.execute("UPDATE recordings SET segments = %s WHERE id = %s", (db.json(utterances), rec["id"]))
-        for idx, group in enumerate(conversations.split(utterances)):
-            _insert_conversation(conn, rec, conversations.build(rec, idx, group))
-    return True
+    return complete
+
+
+class _NoRoom(Exception):
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+
+def _close_conversations(conn, rec, silent_until: float, complete: bool):
+    """Closes every open conversation followed by at least CONVERSATION_GAP_SECONDS of silence
+    (or by the end of the recording); the utterances after it start a new one."""
+    head = conn.execute("SELECT closed_utterances, clusters FROM recordings WHERE id = %s", (rec["id"],)).fetchone()
+    rows = conn.execute(
+        "SELECT * FROM utterances WHERE recording_id = %s AND idx >= %s ORDER BY idx", (rec["id"], head["closed_utterances"])
+    ).fetchall()
+    if not rows:
+        return
+    voice = conn.execute("SELECT embedding FROM voiceprints WHERE user_id = %s", (rec["user_id"],)).fetchone()
+    names = speech.cluster_names(head["clusters"], np.array(voice["embedding"], dtype=np.float32) if voice else None)
+    items = [{"start": r["start_seconds"], "end": r["end_seconds"], "text": r["text"], "speaker": names.get(r["cluster"], "A"), "is_owner": names.get(r["cluster"]) == "我"} for r in rows]
+    groups = conversations.split(items)
+    last_open = not complete and silent_until - groups[-1][-1]["end"] < config.CONVERSATION_GAP_SECONDS
+    closing = groups[:-1] if last_open else groups
+    closed = head["closed_utterances"]
+    idx = conn.execute("SELECT count(*) AS n FROM conversations WHERE recording_id = %s", (rec["id"],)).fetchone()["n"]
+    for group in closing:
+        _insert_conversation(conn, rec, conversations.build(rec, idx, group))
+        idx += 1
+        closed += len(group)
+    conn.execute("UPDATE recordings SET closed_utterances = %s WHERE id = %s", (closed, rec["id"]))
 
 
 def _insert_conversation(conn, rec, conv):
@@ -69,9 +169,11 @@ def _insert_conversation(conn, rec, conv):
     )
 
 
-def _conversations(rec):
+def _pending_conversations(rec):
     with db.tx() as conn:
-        return conn.execute("SELECT * FROM conversations WHERE recording_id = %s ORDER BY idx", (rec["id"],)).fetchall()
+        return conn.execute(
+            "SELECT * FROM conversations WHERE recording_id = %s AND NOT (summarized AND agent_done AND memory_done) ORDER BY idx", (rec["id"],)
+        ).fetchall()
 
 
 def _summarize(lease, rec, conv):
@@ -116,29 +218,43 @@ def _learn(lease, user, conv):
         conn.execute("UPDATE conversations SET memory_done = true WHERE id = %s", (conv["id"],))
 
 
-def process(lease: jobs.Lease):
-    rec, user = _load(lease)
-    if rec["kind"] == "audio" and rec["segments"] is None and not _transcribe(lease, rec, user):
-        return
-    if rec["kind"] == "text":
-        with db.tx() as conn:
-            lease.owned(conn)
-            _insert_conversation(conn, rec, conversations.text_note(rec))
-    with db.tx() as conn:
-        lease.owned(conn)
-        _publish_status(conn, rec, "summarizing")
-    for conv in _conversations(rec):
+def _finish_conversations(lease, rec, user):
+    for conv in _pending_conversations(rec):
         if not conv["summarized"]:
+            with db.tx() as conn:
+                lease.owned(conn)
+                _publish_status(conn, rec, "summarizing")
             conv = _summarize(lease, rec, conv)
         if not conv["agent_done"]:
             _act(lease, rec, user, conv)
         if not conv["memory_done"]:
             _learn(lease, user, conv)
+
+
+def process(lease: jobs.Lease):
+    rec, user = _load(lease)
+    if rec["kind"] == "text":
+        with db.tx() as conn:
+            lease.owned(conn)
+            _insert_conversation(conn, rec, conversations.text_note(rec))
+        complete = True
+    else:
+        try:
+            complete = _transcribe_new_audio(lease, rec, user)
+        except _NoRoom as e:  # lost a race for the last minutes between the check and the charge
+            _pause(lease, rec, e.seconds)
+            return
+        if complete is None:
+            return
+    _finish_conversations(lease, rec, user)
     with db.tx() as conn:
         lease.owned(conn)
-        quota.settle(conn, rec["id"])
+        if complete:
+            quota.settle(conn, rec["id"])
+            _publish_status(conn, rec, "done")
+        else:
+            _publish_status(conn, rec, "uploading")  # waiting for more audio
         jobs.done(conn, lease)
-        _publish_status(conn, rec, "done")
 
 
 def fail(lease: jobs.Lease, error: str):

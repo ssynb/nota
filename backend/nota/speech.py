@@ -74,49 +74,49 @@ def cosine(a, b) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def label_speakers(embeddings: list[np.ndarray | None], owner: np.ndarray | None) -> list[str]:
-    """Greedy clustering of utterance embeddings; the cluster matching the enrolled voiceprint is "我",
-    others are A, B, C… Utterances too short to embed join the previous speaker."""
-    centroids: list[np.ndarray] = []
-    assigned: list[int] = []
+def assign_clusters(embeddings: list[np.ndarray | None], clusters: list[dict], previous: int | None) -> tuple[list[int | None], list[dict]]:
+    """Greedy online clustering, continued across batches of the same recording. clusters is the
+    persisted state [{"sum": [...], "n": k}]; an utterance too short to embed joins the previous speaker."""
+    state = [{"sum": np.array(c["sum"], dtype=np.float32), "n": c["n"]} for c in clusters]
+    out: list[int | None] = []
     for e in embeddings:
         if e is None:
-            assigned.append(assigned[-1] if assigned else -1)
+            out.append(previous)
             continue
-        scores = [cosine(e, c) for c in centroids]
+        scores = [cosine(e, c["sum"]) for c in state]
         if scores and max(scores) >= config.SPEAKER_CLUSTER_THRESHOLD:
             k = int(np.argmax(scores))
-            centroids[k] = centroids[k] + e
+            state[k]["sum"] += e
+            state[k]["n"] += 1
         else:
-            centroids.append(e.copy())
-            k = len(centroids) - 1
-        assigned.append(k)
+            state.append({"sum": e.astype(np.float32).copy(), "n": 1})
+            k = len(state) - 1
+        out.append(k)
+        previous = k
+    return out, [{"sum": c["sum"].tolist(), "n": c["n"]} for c in state]
+
+
+def cluster_names(clusters: list[dict], owner: np.ndarray | None) -> dict[int, str]:
+    """The cluster closest to the enrolled voiceprint (above the threshold) is "我"; the others are
+    A, B, C… in order of first appearance. Without a voiceprint nobody is marked."""
     owner_k = None
-    if owner is not None and centroids:
-        scores = [cosine(owner, c) for c in centroids]
+    if owner is not None and clusters:
+        scores = [cosine(owner, np.array(c["sum"])) for c in clusters]
         if max(scores) >= config.OWNER_THRESHOLD:
             owner_k = int(np.argmax(scores))
-    names, letters = {}, iter("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    for k in assigned:
-        if k not in names:
-            names[k] = "我" if k == owner_k else next(letters)
-    return [names[k] for k in assigned]
+    letters = iter("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    return {k: "我" if k == owner_k else next(letters) for k in range(len(clusters))}
 
 
-def transcribe_recording(samples: np.ndarray, segments: list[tuple[float, float]], owner: np.ndarray | None) -> list[dict]:
-    """Utterances of the whole recording: [{start, end, text, speaker, is_owner}] with times in seconds."""
-    spans = utterances(segments)
-    texts, embeddings = [], []
+def transcribe_spans(samples: np.ndarray, offset: float, spans: list[tuple[float, float]]) -> list[dict]:
+    """ASR and an embedding per utterance; samples start at `offset` seconds of the recording."""
+    out = []
     for start, end in spans:
-        piece = samples[int(start * RATE) : int(end * RATE)]
-        texts.append(transcribe(piece))
-        embeddings.append(embed(piece) if end - start >= MIN_EMBED else None)
-    labels = label_speakers(embeddings, owner)
-    return [
-        {"start": round(s, 2), "end": round(e, 2), "text": t, "speaker": label, "is_owner": label == "我"}
-        for (s, e), t, label in zip(spans, texts, labels)
-        if t
-    ]
+        piece = samples[int((start - offset) * RATE) : int((end - offset) * RATE)]
+        text = transcribe(piece)
+        if text:
+            out.append({"start": round(start, 2), "end": round(end, 2), "text": text, "embedding": embed(piece) if end - start >= MIN_EMBED else None})
+    return out
 
 
 def speech_seconds(segments: list[tuple[float, float]]) -> float:

@@ -78,12 +78,15 @@ def _owned(conn, user, recording_id):
 def put_chunk(conn, user, recording_id, seq: int, data: bytes) -> bool:
     """Stores the chunk unless it is already there. Returns True for a duplicate."""
     rec = _owned(conn, user, recording_id)
-    read_wav(data)
+    seconds = len(read_wav(data)) / 2 / RATE
     inserted = conn.execute(
-        "INSERT INTO chunks (recording_id, seq, audio) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (recording_id, seq, data)
+        "INSERT INTO chunks (recording_id, seq, audio, duration_seconds) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+        (recording_id, seq, data, seconds),
     ).rowcount
     if inserted and rec["status"] == "recording":
         _status(conn, user["id"], recording_id, "uploading")
+    if inserted and rec["ai"] == "enabled":
+        jobs.enqueue(conn, recording_id)  # transcribe while recording continues
     return not inserted
 
 
@@ -103,7 +106,7 @@ def finish(conn, user, recording_id, total: int) -> list[int]:
         rec["total_chunks"] = total
     gaps = missing(conn, recording_id, rec["total_chunks"])
     if not gaps and rec["ai"] == "enabled":
-        jobs.enqueue(conn, recording_id)
+        jobs.enqueue(conn, recording_id)  # closes the last conversation
     return gaps
 
 
@@ -117,7 +120,7 @@ def text_note(conn, user, idem_key: str, text: str, now: datetime) -> uuid.UUID:
 def resume_paused(conn, user_id=None) -> int:
     """Gives paused recordings another go at the ledger that paused them; resumed ones are queued."""
     rows = conn.execute(
-        """SELECT r.id, r.pause_reason, r.kind, r.total_chunks, r.speech_seconds, u.id AS uid, u.plan, u.timezone
+        """SELECT r.id, r.pause_reason, r.kind, r.pending_seconds, u.id AS uid, u.plan, u.timezone
            FROM recordings r JOIN users u ON u.id = r.user_id
            WHERE r.ai = 'paused_quota' AND (%s::text IS NULL OR r.user_id = %s) ORDER BY r.created_at
            FOR UPDATE OF r SKIP LOCKED""",
@@ -129,14 +132,13 @@ def resume_paused(conn, user_id=None) -> int:
         if r["pause_reason"] == "recordings_today":
             ok = quota.take_recording_slot(conn, user, r["id"])
         else:
-            ok = quota.charge_minutes(conn, user, r["id"], r["speech_seconds"])
+            # the job charges atomically; here it is only worth waking if the waiting speech now fits
+            ok = quota.has_room(conn, user, r["pending_seconds"] or 0)
         if not ok:
             continue
-        conn.execute("UPDATE recordings SET ai = 'enabled', pause_reason = NULL WHERE id = %s", (r["id"],))
-        ready = r["kind"] == "text" or (r["total_chunks"] is not None and not missing(conn, r["id"], r["total_chunks"]))
+        conn.execute("UPDATE recordings SET ai = 'enabled', pause_reason = NULL, pending_seconds = NULL WHERE id = %s", (r["id"],))
         _status(conn, user["id"], r["id"], "uploading" if r["kind"] == "audio" else "recording")
-        if ready:
-            jobs.enqueue(conn, r["id"])
+        jobs.enqueue(conn, r["id"])
         quota.publish(conn, user)
         resumed += 1
     return resumed

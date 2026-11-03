@@ -46,9 +46,9 @@ def take_recording_slot(conn, user, recording_id) -> bool:
 
 
 def charge_minutes(conn, user, recording_id, seconds: float) -> bool:
-    """Charges a recording's speech once. Returns False when the ledger has no room (AI pauses)."""
-    charged = conn.execute("SELECT period FROM recording_charges WHERE recording_id = %s", (recording_id,)).fetchone()
-    if charged and charged["period"]:
+    """Charges one batch of speech. The caller commits it together with the recording's cursor, which is
+    what keeps a batch from being charged twice. Returns False when there is no room (AI pauses)."""
+    if seconds <= 0:
         return True
     period = month(user)
     if _free(user):
@@ -61,37 +61,44 @@ def charge_minutes(conn, user, recording_id, seconds: float) -> bool:
             {"u": user["id"], "p": period, "s": seconds, "limit": config.FREE_MINUTES_PER_MONTH * 60},
         ).rowcount
     else:
-        ok = _charge_pro(conn, user, period, seconds)
+        # Rolling windows are sums, not counters: the user's row lock serialises concurrent charges.
+        conn.execute("SELECT 1 FROM users WHERE id = %s FOR UPDATE", (user["id"],))
+        ok = _pro_room(conn, user, seconds)
+        if ok:
+            conn.execute(
+                """INSERT INTO monthly_usage (user_id, period, speech_seconds) VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id, period) DO UPDATE SET speech_seconds = monthly_usage.speech_seconds + excluded.speech_seconds""",
+                (user["id"], period, seconds),
+            )
     if not ok:
         return False
     conn.execute(
-        """INSERT INTO recording_charges (recording_id, user_id, period, speech_seconds, charged_at, status)
-           VALUES (%(r)s, %(u)s, %(p)s, %(s)s, %(at)s, 'reserved')
-           ON CONFLICT (recording_id) DO UPDATE SET period = excluded.period, speech_seconds = excluded.speech_seconds,
-             charged_at = excluded.charged_at""",
-        {"r": recording_id, "u": user["id"], "p": period, "s": seconds, "at": clock.now()},
+        "INSERT INTO minute_charges (recording_id, user_id, period, seconds, charged_at, status) VALUES (%s, %s, %s, %s, %s, 'reserved')",
+        (recording_id, user["id"], period, seconds, clock.now()),
     )
     return True
 
 
-def _charge_pro(conn, user, period, seconds) -> bool:
-    # Rolling windows are sums, not counters: the user's row lock serialises concurrent charges.
-    conn.execute("SELECT 1 FROM users WHERE id = %s FOR UPDATE", (user["id"],))
+def _pro_room(conn, user, seconds) -> bool:
     now = clock.now()
     for hours, minutes in config.PRO_FAIR_USE_MINUTES.items():
         used = conn.execute(
-            """SELECT coalesce(sum(speech_seconds), 0) AS s FROM recording_charges
+            """SELECT coalesce(sum(seconds), 0) AS s FROM minute_charges
                WHERE user_id = %s AND status <> 'refunded' AND charged_at > %s""",
             (user["id"], now - timedelta(hours=hours)),
         ).fetchone()["s"]
         if used + seconds > minutes * 60:
             return False
-    conn.execute(
-        """INSERT INTO monthly_usage (user_id, period, speech_seconds) VALUES (%s, %s, %s)
-           ON CONFLICT (user_id, period) DO UPDATE SET speech_seconds = monthly_usage.speech_seconds + excluded.speech_seconds""",
-        (user["id"], period, seconds),
-    )
     return True
+
+
+def has_room(conn, user, seconds: float) -> bool:
+    """Read-only check used to decide whether a paused recording is worth retrying; the charge itself
+    is still the atomic one above."""
+    if not _free(user):
+        return _pro_room(conn, user, seconds)
+    row = conn.execute("SELECT speech_seconds FROM monthly_usage WHERE user_id = %s AND period = %s", (user["id"], month(user))).fetchone()
+    return (row["speech_seconds"] if row else 0) + seconds <= config.FREE_MINUTES_PER_MONTH * 60
 
 
 def take_ask(conn, user) -> str | None:
@@ -112,23 +119,26 @@ def refund_ask(conn, user_id, period):
 
 
 def refund_recording(conn, recording_id):
-    row = conn.execute(
-        "SELECT * FROM recording_charges WHERE recording_id = %s AND status <> 'refunded' FOR UPDATE", (recording_id,)
+    slot = conn.execute(
+        "UPDATE recording_charges SET status = 'refunded' WHERE recording_id = %s AND status <> 'refunded' RETURNING user_id, day", (recording_id,)
     ).fetchone()
-    if not row:
-        return
-    if row["day"]:
-        conn.execute("UPDATE daily_usage SET used = used - 1 WHERE user_id = %s AND day = %s", (row["user_id"], row["day"]))
-    if row["period"]:
+    if slot:
+        conn.execute("UPDATE daily_usage SET used = used - 1 WHERE user_id = %s AND day = %s", (slot["user_id"], slot["day"]))
+    rows = conn.execute(
+        """UPDATE minute_charges SET status = 'refunded' WHERE recording_id = %s AND status <> 'refunded'
+           RETURNING user_id, period, seconds""",
+        (recording_id,),
+    ).fetchall()
+    for r in rows:
         conn.execute(
             "UPDATE monthly_usage SET speech_seconds = speech_seconds - %s WHERE user_id = %s AND period = %s",
-            (row["speech_seconds"], row["user_id"], row["period"]),
+            (r["seconds"], r["user_id"], r["period"]),
         )
-    conn.execute("UPDATE recording_charges SET status = 'refunded' WHERE recording_id = %s", (recording_id,))
 
 
 def settle(conn, recording_id):
     conn.execute("UPDATE recording_charges SET status = 'charged' WHERE recording_id = %s AND status = 'reserved'", (recording_id,))
+    conn.execute("UPDATE minute_charges SET status = 'charged' WHERE recording_id = %s AND status = 'reserved'", (recording_id,))
 
 
 def snapshot(conn, user) -> dict:

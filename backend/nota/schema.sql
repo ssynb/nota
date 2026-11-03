@@ -16,12 +16,15 @@ CREATE TABLE IF NOT EXISTS recordings (
   ai text NOT NULL CHECK (ai IN ('enabled', 'paused_quota')),
   -- which ledger paused it: the day's recording count (at start) or speech minutes (at processing)
   pause_reason text CHECK (pause_reason IN ('recordings_today', 'minutes')),
-  vad_segments jsonb,                -- VAD checkpoint: [[start, end], ...] seconds
-  speech_seconds double precision,   -- what the minutes ledger is charged
-  segments jsonb,                    -- ASR + speaker checkpoint
   error text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Incremental processing checkpoint: audio before cursor_seconds is transcribed; utterances from
+-- closed_utterances on belong to the conversation still open; clusters are the speaker centroids.
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS cursor_seconds double precision NOT NULL DEFAULT 0;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS closed_utterances int NOT NULL DEFAULT 0;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS clusters jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS pending_seconds double precision;  -- speech waiting for minutes while paused
 CREATE INDEX IF NOT EXISTS recordings_paused ON recordings (user_id) WHERE ai = 'paused_quota';
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -29,6 +32,18 @@ CREATE TABLE IF NOT EXISTS chunks (
   seq int NOT NULL CHECK (seq >= 0),
   audio bytea NOT NULL,
   PRIMARY KEY (recording_id, seq)
+);
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS duration_seconds double precision;
+UPDATE chunks SET duration_seconds = (octet_length(audio) - 44) / 32000.0 WHERE duration_seconds IS NULL;
+
+CREATE TABLE IF NOT EXISTS utterances (
+  recording_id uuid NOT NULL REFERENCES recordings ON DELETE CASCADE,
+  idx int NOT NULL,
+  start_seconds double precision NOT NULL,
+  end_seconds double precision NOT NULL,
+  text text NOT NULL,
+  cluster int,                      -- speaker cluster within the recording
+  PRIMARY KEY (recording_id, idx)
 );
 
 -- Ledgers. A recording is charged at most once per ledger: recording_charges is keyed by recording.
@@ -45,13 +60,22 @@ CREATE TABLE IF NOT EXISTS monthly_usage (
 CREATE TABLE IF NOT EXISTS recording_charges (
   recording_id uuid PRIMARY KEY REFERENCES recordings,
   user_id text NOT NULL,
-  day date,                         -- set once the day's recording slot is taken
-  period text,                      -- set once speech minutes are charged
-  speech_seconds double precision,
-  charged_at timestamptz,
+  day date NOT NULL,                -- the day whose recording slot it took
   status text NOT NULL CHECK (status IN ('reserved', 'charged', 'refunded'))
 );
-CREATE INDEX IF NOT EXISTS recording_charges_window ON recording_charges (user_id, charged_at);
+-- Speech is charged batch by batch as audio is transcribed; each batch is one row, written in the same
+-- transaction that advances the recording's cursor, so a batch is never charged twice.
+CREATE TABLE IF NOT EXISTS minute_charges (
+  id bigserial PRIMARY KEY,
+  recording_id uuid NOT NULL REFERENCES recordings,
+  user_id text NOT NULL,
+  period text NOT NULL,
+  seconds double precision NOT NULL,
+  charged_at timestamptz NOT NULL,
+  status text NOT NULL CHECK (status IN ('reserved', 'charged', 'refunded'))
+);
+CREATE INDEX IF NOT EXISTS minute_charges_window ON minute_charges (user_id, charged_at);
+CREATE INDEX IF NOT EXISTS minute_charges_recording ON minute_charges (recording_id);
 
 CREATE TABLE IF NOT EXISTS jobs (
   recording_id uuid PRIMARY KEY REFERENCES recordings,
@@ -62,6 +86,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   lease_until timestamptz,
   last_error text
 );
+-- set when new audio arrives while the job runs: the run ends by queueing itself again
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rerun boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS jobs_due ON jobs (run_after) WHERE status IN ('queued', 'running');
 
 CREATE TABLE IF NOT EXISTS conversations (

@@ -15,11 +15,16 @@ class LeaseLost(Exception):
 
 
 def enqueue(conn, recording_id):
-    """Queues the recording once; a job that already finished (e.g. paused by quota) is queued again."""
+    """Asks for the recording to be (re)processed: an idle job is queued again; a running one is marked
+    to run once more when it ends, so audio that arrives mid-run is never left waiting."""
     conn.execute(
         """INSERT INTO jobs (recording_id, status) VALUES (%s, 'queued')
-           ON CONFLICT (recording_id) DO UPDATE SET status = 'queued', attempts = 0, run_after = now(), owner = NULL, last_error = NULL
-           WHERE jobs.status = 'done'""",
+           ON CONFLICT (recording_id) DO UPDATE SET
+             rerun = jobs.rerun OR jobs.status = 'running',
+             status = CASE WHEN jobs.status = 'done' THEN 'queued' ELSE jobs.status END,
+             attempts = CASE WHEN jobs.status = 'done' THEN 0 ELSE jobs.attempts END,
+             run_after = CASE WHEN jobs.status = 'done' THEN now() ELSE jobs.run_after END,
+             owner = CASE WHEN jobs.status = 'done' THEN NULL ELSE jobs.owner END""",
         (recording_id,),
     )
     conn.execute("SELECT pg_notify(%s, '')", (CHANNEL,))
@@ -37,6 +42,8 @@ class Lease:
         self._stop = threading.Event()
 
     def owned(self, conn):
+        # Lock order everywhere is recording row, then job row (the API locks in the same order).
+        conn.execute("SELECT 1 FROM recordings WHERE id = %s FOR UPDATE", (self.recording_id,))
         row = conn.execute(
             "SELECT 1 FROM jobs WHERE recording_id = %s AND owner = %s AND status = 'running' FOR UPDATE", (self.recording_id, self.owner)
         ).fetchone()
@@ -90,7 +97,14 @@ def seconds_until_due() -> float | None:
 
 
 def done(conn, lease: Lease):
-    conn.execute("UPDATE jobs SET status = 'done', owner = NULL WHERE recording_id = %s", (lease.recording_id,))
+    """Ends this run: idle, or queued again if new audio arrived meanwhile."""
+    conn.execute(
+        """UPDATE jobs SET status = CASE WHEN rerun THEN 'queued' ELSE 'done' END,
+             attempts = CASE WHEN rerun THEN 0 ELSE attempts END, run_after = now(), rerun = false, owner = NULL
+           WHERE recording_id = %s""",
+        (lease.recording_id,),
+    )
+    conn.execute("SELECT pg_notify(%s, '')", (CHANNEL,))
 
 
 def retry_or_fail(conn, lease: Lease, error: str) -> bool:

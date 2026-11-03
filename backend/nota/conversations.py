@@ -45,7 +45,10 @@ def text_note(recording) -> dict:
 
 def render(conv: dict) -> str:
     """Transcript as the model reads it: a speaker legend, then `[mm:ss] 说话人：原话` lines."""
-    legend = "；".join(f"{s['label']}={'用户本人' if s['is_owner'] else '其他人'}" for s in conv["speakers"])
+    if any(s["is_owner"] for s in conv["speakers"]):
+        legend = "；".join(f"{s['label']}={'用户本人' if s['is_owner'] else '其他人'}" for s in conv["speakers"])
+    else:  # no voiceprint enrolled: the owner is one of them, unknown which
+        legend = "、".join(s["label"] for s in conv["speakers"]) + "（未注册声纹，不知道哪位是用户本人；用第一人称提出的安排按用户本人的意图处理）"
     lines = [f"[{int(l['offset']) // 60:02d}:{int(l['offset']) % 60:02d}] {l['speaker']}：{l['text']}" for l in conv["lines"]]
     return f"说话人：{legend}\n" + "\n".join(lines)
 
