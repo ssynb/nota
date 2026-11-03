@@ -4,7 +4,7 @@ import uuid
 import numpy as np
 import pytest
 
-from tests.support import Client, Service, Stream, new_user, silence, speech, wav_bytes
+from tests.support import Client, Service, Stream, new_user, silence, speech, split, wav_bytes
 
 OWNER_ENROL = "我是这台设备的主人，现在录一段声音用来注册声纹，请记住我说话的声音特点。"
 OWNER_MEETING = "下周三下午三点和张总开预算评审会，提前一天提醒我准备报表。"
@@ -186,3 +186,32 @@ def test_state_has_the_contract_shape(svc):
     assert set(state["quota"]) == {"minutes", "recordings_today", "asks"}
     assert state["quota"]["minutes"]["limit"] == 300 and state["quota"]["asks"]["limit"] == 30
     uuid.UUID(state["user"]["id"])
+
+
+def test_conversation_closes_after_120s_of_silence_while_the_recording_is_still_open(svc):
+    user = new_user()
+    c = Client(svc.url, user)
+    stream = Stream(svc.url, user)
+    rid = c.start_recording()["recording_id"]
+    # 3-second chunks cut the sentence mid-word; the transcript must still be whole
+    first = split(np.concatenate([speech(OWNER_MEETING), silence(125)]), 3)
+    for seq, data in enumerate(first):
+        c.put_chunk(rid, seq, data).raise_for_status()
+
+    closed = stream.wait_for(lambda n, d: n == "conversation" and d["recording_id"] == rid and d["facts"], timeout=180)
+    action = stream.wait_for(lambda n, d: n == "action" and d["type"] == "create_calendar_event")
+    finished_before = any(n == "recording" and d["recording_id"] == rid and d["status"] == "done" for n, d in stream.events)
+
+    rest = split(np.concatenate([speech(GUEST, "Meijia"), silence(1)]), 3)
+    for seq, data in enumerate(rest, len(first)):
+        c.put_chunk(rid, seq, data).raise_for_status()
+    assert c.finish(rid, len(first) + len(rest)) == {"missing": []}
+    stream.recording_status(rid, "done")
+
+    assert not finished_before
+    assert any("评审会" in f["text"] for f in closed["facts"])
+    assert action["status"] == "pending"
+    conversations = sorted((x for x in c.state()["conversations"] if x["recording_id"] == rid), key=lambda x: x["started_at"])
+    assert len(conversations) == 2
+    assert conversations[0]["id"] == closed["id"]
+    assert any("合同" in f["text"] for f in conversations[1]["facts"])
