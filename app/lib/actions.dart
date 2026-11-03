@@ -90,6 +90,13 @@ class ActionRunner {
     }
   }
 
+  /// 正文已经称呼了收件人就原样分享，否则在开头加上称呼。
+  static String _message(Map<String, dynamic> args) {
+    final to = args['to'] as String;
+    final text = args['text'] as String;
+    return text.contains(to) ? text : '$to，$text';
+  }
+
   Future<ActionResult> _execute(Map<String, dynamic> action) async {
     final args = (action['args'] as Map).cast<String, dynamic>();
     try {
@@ -111,7 +118,7 @@ class ActionRunner {
               ? (ok: true, systemId: null, error: null)
               : (ok: false, systemId: null, error: 'event_not_found');
         case 'share_message':
-          final sent = await sharer.share('${args['to']}，${args['text']}');
+          final sent = await sharer.share(_message(args));
           return sent
               ? (ok: true, systemId: null, error: null)
               : (ok: false, systemId: null, error: 'user_cancelled');
