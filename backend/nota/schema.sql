@@ -77,15 +77,27 @@ CREATE TABLE IF NOT EXISTS minute_charges (
 CREATE INDEX IF NOT EXISTS minute_charges_window ON minute_charges (user_id, charged_at);
 CREATE INDEX IF NOT EXISTS minute_charges_recording ON minute_charges (recording_id);
 
+-- One job per recording and kind: 'process' (transcribe, minutes, agent) and 'profile' (learn the
+-- profile from finished conversations), so a profile failure never touches the delivered recording.
 CREATE TABLE IF NOT EXISTS jobs (
-  recording_id uuid PRIMARY KEY REFERENCES recordings,
+  recording_id uuid NOT NULL REFERENCES recordings,
+  kind text NOT NULL DEFAULT 'process' CHECK (kind IN ('process', 'profile')),
   status text NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
   attempts int NOT NULL DEFAULT 0,
   run_after timestamptz NOT NULL DEFAULT now(),
   owner uuid,
   lease_until timestamptz,
-  last_error text
+  last_error text,
+  PRIMARY KEY (recording_id, kind)
 );
+-- databases created before job kinds: add the column and widen the key
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'process';
+DO $$ BEGIN
+  IF (SELECT array_length(conkey, 1) FROM pg_constraint WHERE conname = 'jobs_pkey') = 1 THEN
+    ALTER TABLE jobs DROP CONSTRAINT jobs_pkey;
+    ALTER TABLE jobs ADD PRIMARY KEY (recording_id, kind);
+  END IF;
+END $$;
 -- set when new audio arrives while the job runs: the run ends by queueing itself again
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rerun boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS jobs_due ON jobs (run_after) WHERE status IN ('queued', 'running');

@@ -4,7 +4,9 @@ Each run takes the contiguous prefix of chunks that is not yet transcribed, VADs
 the utterances that are certainly complete; speech touching the end of what has arrived is left for
 the next chunk (or finish), so a chunk boundary never cuts a sentence. Speech is charged per batch.
 When 120 seconds of silence follow the last utterance, the open conversation closes and gets its
-minutes, agent run and profile update right away, while the recording goes on.
+minutes and agent run right away, while the recording goes on. Learning the profile is a separate
+'profile' job on the same queue: once minutes and actions are in, the recording is done and charged,
+whatever happens to the profile update.
 
 Every result is a checkpoint written under the job lease (see jobs.Lease.owned): a retry or a
 takeover resumes where the last owner stopped, and a superseded owner cannot write anything.
@@ -172,7 +174,7 @@ def _insert_conversation(conn, rec, conv):
 def _pending_conversations(rec):
     with db.tx() as conn:
         return conn.execute(
-            "SELECT * FROM conversations WHERE recording_id = %s AND NOT (summarized AND agent_done AND memory_done) ORDER BY idx", (rec["id"],)
+            "SELECT * FROM conversations WHERE recording_id = %s AND NOT (summarized AND agent_done) ORDER BY idx", (rec["id"],)
         ).fetchall()
 
 
@@ -205,17 +207,9 @@ def _act(lease, rec, user, conv):
         for action in agent.commit_plan(conn, user, conv["id"], plan):
             events.publish(conn, user["id"], "action", action)
         conn.execute("UPDATE conversations SET agent_done = true WHERE id = %s", (conv["id"],))
+        jobs.enqueue(conn, rec["id"], jobs.PROFILE)  # the profile is learned by its own job
         row = conn.execute("SELECT * FROM conversations WHERE id = %s", (conv["id"],)).fetchone()
         events.publish(conn, user["id"], "conversation", state.conversation(conn, row))
-
-
-def _learn(lease, user, conv):
-    with db.tx() as conn:
-        learned = memory.plan(conn, user["id"], conversations.render(conv))
-    with db.tx() as conn:
-        lease.owned(conn)
-        memory.apply(conn, user["id"], learned)
-        conn.execute("UPDATE conversations SET memory_done = true WHERE id = %s", (conv["id"],))
 
 
 def _finish_conversations(lease, rec, user):
@@ -227,8 +221,6 @@ def _finish_conversations(lease, rec, user):
             conv = _summarize(lease, rec, conv)
         if not conv["agent_done"]:
             _act(lease, rec, user, conv)
-        if not conv["memory_done"]:
-            _learn(lease, user, conv)
 
 
 def process(lease: jobs.Lease):
@@ -255,6 +247,36 @@ def process(lease: jobs.Lease):
         else:
             _publish_status(conn, rec, "uploading")  # waiting for more audio
         jobs.done(conn, lease)
+
+
+def learn_profile(lease: jobs.Lease):
+    """The profile job: learns from every conversation of the recording whose minutes and actions are
+    done but whose profile update is not. Nothing here changes the recording's status or charges."""
+    rec, user = _load(lease)
+    with db.tx() as conn:
+        pending = conn.execute(
+            "SELECT * FROM conversations WHERE recording_id = %s AND agent_done AND NOT memory_done ORDER BY idx", (rec["id"],)
+        ).fetchall()
+    for conv in pending:
+        with db.tx() as conn:
+            learned = memory.plan(conn, user["id"], conversations.render(conv))
+        with db.tx() as conn:
+            lease.owned(conn)
+            memory.apply(conn, user["id"], learned)
+            conn.execute("UPDATE conversations SET memory_done = true WHERE id = %s", (conv["id"],))
+    with db.tx() as conn:
+        lease.owned(conn)
+        jobs.done(conn, lease)
+
+
+def fail_profile(lease: jobs.Lease, error: str):
+    """A failed profile update is retried on its own and only reported; the recording stays as it is."""
+    rec, _ = _load(lease)
+    with db.tx() as conn:
+        lease.owned(conn)
+        delay = jobs.retry_or_fail(conn, lease, error[:500])
+        notice = "画像更新失败，稍后重试" if delay is not None else f"画像更新失败（已重试 {lease.attempts} 次）"
+        events.publish(conn, rec["user_id"], "recording", {"recording_id": str(rec["id"]), "status": rec["status"], "error": f"{notice}：{error[:200]}"})
 
 
 def fail(lease: jobs.Lease, error: str):

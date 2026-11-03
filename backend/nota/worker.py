@@ -23,14 +23,15 @@ def run_one() -> bool:
     if lease is None:
         return False
     with lease:
+        run, fail = (pipeline.learn_profile, pipeline.fail_profile) if lease.kind == jobs.PROFILE else (pipeline.process, pipeline.fail)
         try:
-            pipeline.process(lease)
+            run(lease)
         except jobs.LeaseLost:
             log.warning("lease lost on %s; another worker owns it now", lease.recording_id)
-        except Exception as e:  # noqa: BLE001 — any failed step is retried, and refunded once attempts run out
-            log.error("job %s failed: %s", lease.recording_id, traceback.format_exc())
+        except Exception as e:  # noqa: BLE001 — any failure is retried; a process job that runs out is refunded
+            log.error("%s job %s failed: %s", lease.kind, lease.recording_id, traceback.format_exc())
             try:
-                pipeline.fail(lease, str(e) if isinstance(e, llm.LLMError) else f"{type(e).__name__}: {e}")
+                fail(lease, str(e) if isinstance(e, llm.LLMError) else f"{type(e).__name__}: {e}")
             except jobs.LeaseLost:
                 pass
     return True
