@@ -29,7 +29,7 @@ flutter run -d <模拟器 ID> \
 
 ### 装到真机
 
-手机和 Mac 连同一 Wi-Fi，后端监听 `0.0.0.0`。Bundle ID 为 `com.ssynb.nota`，在 Xcode 用 Apple ID（免费 Personal Team 即可）开启自动签名后：
+手机和 Mac 连同一 Wi-Fi，后端监听 `0.0.0.0`。Bundle ID 为 `com.ssynb.nota`，工程用自动签名、团队 `82SF99ZDUT`（个人免费团队）；换人构建时在 Xcode 的 Signing & Capabilities 里改成自己的 Team，免费团队还需改一个全局唯一的 Bundle ID。之后：
 
 ```sh
 flutter run --release -d <设备 UDID> --dart-define=NOTA_API=http://<Mac 局域网 IP>:8077
