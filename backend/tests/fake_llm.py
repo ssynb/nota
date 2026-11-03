@@ -7,6 +7,7 @@ Which call it is follows from the request: tools offered (agent vs ask) or the s
   #slow    -> the summary call takes SLOW_SECONDS
   #busy    -> like DeepSeek under load: 200 headers at once, then only keep-alive blank lines, never a body
   #null    -> 200 with the body `null`
+  #due     -> the agent creates a todo whose due is a bare date
   #loop    -> the agent asks for get_profile on every turn, each turn taking LOOP_TURN_SECONDS
 Like DeepSeek thinking mode, follow-ups that drop reasoning_content are rejected.
 """
@@ -46,6 +47,8 @@ def _summary(material):
 
 def _agent(messages, material):
     if not any(m["role"] == "tool" for m in messages):
+        if "#due" in material:
+            return _tool_turn([("create_todo", {"title": "交周报", "due": "2026-11-06"})])
         if "评审会" in material:
             return _tool_turn([
                 ("create_calendar_event", {"title": "预算评审会", "start": "2026-11-11T15:00:00+08:00", "end": "2026-11-11T16:00:00+08:00", "alarm_minutes_before": 1440}),

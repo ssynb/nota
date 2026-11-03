@@ -1,5 +1,7 @@
 """Audio and text through the real pipeline (VAD, SenseVoice, CAM++, Postgres queue) with the model faked."""
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -215,3 +217,12 @@ def test_conversation_closes_after_120s_of_silence_while_the_recording_is_still_
     assert len(conversations) == 2
     assert conversations[0]["id"] == closed["id"]
     assert any("合同" in f["text"] for f in conversations[1]["facts"])
+
+
+def test_todo_due_given_as_a_bare_date_means_the_end_of_that_day_in_the_users_timezone(svc):
+    c = Client(svc.url, new_user())
+    stream = Stream(svc.url, c.user)
+    stream.recording_status(c.text_note("#due 周五之前交周报"), "done")
+
+    due = datetime.fromisoformat(c.state()["todos"][0]["due_at"])
+    assert due == datetime(2026, 11, 6, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
