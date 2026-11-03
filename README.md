@@ -149,7 +149,7 @@ sequenceDiagram
 - 音频分片存在 Postgres 的 `bytea` 里；正式部署应放对象存储。
 - 确认卡片没有过期时间；人物别名（张总 = 张伟）只记在画像里，没有单独的人物表。
 - 用户身份是客户端生成的 ID，没有鉴权，仅供演示。
-- 网页的浏览器录音用 ScriptProcessor 采集；只在 Playwright 下用注入的音频流验证过，真实麦克风需手动试。
+- 网页录音用设备默认采样率采集（AudioWorklet），在页面里按均值低通降到 16 kHz 再分片；已用本机 Chrome 的真实 getUserMedia（内置麦克风、Chrome 假设备与音频文件）验证，蓝牙耳机等其他输入设备未测。
 
 ## SenseVoice 授权说明
 

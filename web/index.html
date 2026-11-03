@@ -154,7 +154,7 @@ function refresh() {
     fill('actions', s.actions.slice().reverse(), renderAction, '暂无');
     fill('todos', s.todos, (t) => el('li', t.text + (t.due_at ? `（${fmt(t.due_at)} 前）` : ''), 'card'), '暂无');
     fill('profile', s.profile, renderProfileItem, '对话整理后自动学习');
-    $('vp-state').textContent = s.voiceprint_enrolled ? '已注册：纪要里会标出你本人' : '未注册：纪要不标注本人';
+    if ($('vp-state').className !== 'status bad') $('vp-state').textContent = s.voiceprint_enrolled ? '已注册：纪要里会标出你本人' : '未注册：纪要不标注本人';
   }, 150);
 }
 
@@ -191,6 +191,27 @@ async function subscribe() {
   }
 }
 
+// ---------- errors ----------
+/** Turns a failure into words the user can act on; nothing is swallowed. */
+function explain(e) {
+  if (e?.name === 'TypeError' && !window.isSecureContext) return '浏览器只允许 https 或 http://localhost 页面使用麦克风，请用 http://localhost 打开';
+  switch (e?.name) {
+    case 'NotAllowedError': return '麦克风权限被拒绝：在地址栏左侧的网站设置里允许麦克风；macOS 还要在 系统设置 → 隐私与安全性 → 麦克风 里允许 Chrome';
+    case 'NotFoundError': return '没有找到可用的麦克风';
+    case 'NotReadableError': return '麦克风被其他程序占用或无法读取';
+    default: return `${e?.name ?? 'Error'}：${e?.message ?? e}`;
+  }
+}
+function fail(where, e) { const msg = `${where}：${typeof e === 'string' ? e : explain(e)}`; log(msg, 'status bad'); return msg; }
+window.addEventListener('unhandledrejection', (ev) => fail('页面出错', ev.reason));
+
+async function postJson(path, body) {
+  const r = await api(path, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`${path} 返回 ${r.status}：${data.detail ?? data.error ?? ''}`);
+  return data;
+}
+
 // ---------- audio ----------
 function wav(samples) {
   const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
@@ -202,22 +223,60 @@ function wav(samples) {
   return new Blob([buf], { type:'audio/wav' });
 }
 
-function resample(input, from) {
-  if (from === RATE) return input;
-  const out = new Float32Array(Math.floor(input.length * RATE / from));
-  for (let i = 0; i < out.length; i++) out[i] = input[Math.floor(i * from / RATE)];
-  return out;
+/** Streaming downsampler to 16 kHz: each output sample is the mean of the input samples it covers
+    (a box low-pass), so speech above 8 kHz does not alias into the band the recogniser hears. */
+function downsampler(from) {
+  const ratio = from / RATE;
+  let carry = new Float32Array(0), pos = 0;
+  return (input) => {
+    const data = new Float32Array(carry.length + input.length); data.set(carry); data.set(input, carry.length);
+    const out = [];
+    for (; pos + ratio <= data.length; pos += ratio) {
+      const a = Math.floor(pos), b = Math.max(a + 1, Math.floor(pos + ratio));
+      let sum = 0; for (let i = a; i < b; i++) sum += data[i];
+      out.push(sum / (b - a));
+    }
+    const keep = Math.floor(pos); carry = data.slice(keep); pos -= keep;
+    return Float32Array.from(out);
+  };
 }
 
-/** Captures mono 16 kHz samples; calls onSamples with Float32Arrays until stop() resolves. */
-async function capture(onSamples) {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true } });
-  const ctx = new AudioContext({ sampleRate: RATE });
-  const src = ctx.createMediaStreamSource(stream);
-  const node = ctx.createScriptProcessor(4096, 1, 1);
-  node.onaudioprocess = (e) => onSamples(resample(new Float32Array(e.inputBuffer.getChannelData(0)), ctx.sampleRate));
-  src.connect(node); node.connect(ctx.destination);
-  return async () => { node.disconnect(); src.disconnect(); stream.getTracks().forEach((t) => t.stop()); await ctx.close(); };
+// The worklet batches 128-frame render quanta and hands them to the page; 'flush' returns the rest.
+const WORKLET = `class Tap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; this.n = 0;
+    this.port.onmessage = () => { this.send(); this.port.postMessage('flushed'); }; }
+  send() { if (!this.n) return; const out = new Float32Array(this.n); let o = 0;
+    for (const b of this.buf) { out.set(b, o); o += b.length; } this.buf = []; this.n = 0; this.port.postMessage(out, [out.buffer]); }
+  process(inputs) { const ch = inputs[0][0]; if (ch) { this.buf.push(ch.slice()); this.n += ch.length; if (this.n >= 4096) this.send(); } return true; }
+}
+registerProcessor('tap', Tap);`;
+
+/** Opens the microphone at the device's own rate and delivers mono 16 kHz Float32Arrays to onSamples.
+    Resolves to stop(); rejects (with the browser's error) if the microphone cannot be opened.
+    onEnded fires if the device goes away while recording. */
+async function capture(onSamples, onEnded) {
+  if (!navigator.mediaDevices?.getUserMedia) throw new TypeError('navigator.mediaDevices 不可用');
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  const ctx = new AudioContext();
+  try {
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
+    if (ctx.state !== 'running') await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const tap = new AudioWorkletNode(ctx, 'tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+    const mute = ctx.createGain(); mute.gain.value = 0;  // keeps the node pulled without playing the mic back
+    const down = downsampler(ctx.sampleRate);
+    let flushed = null;
+    tap.port.onmessage = (ev) => { if (ev.data === 'flushed') flushed?.(); else onSamples(down(ev.data)); };
+    src.connect(tap); tap.connect(mute); mute.connect(ctx.destination);
+    stream.getAudioTracks()[0].onended = () => onEnded?.();
+    return async () => {
+      await new Promise((resolve) => { flushed = resolve; tap.port.postMessage('flush'); setTimeout(resolve, 500); });
+      src.disconnect(); tap.disconnect(); stream.getTracks().forEach((t) => t.stop()); await ctx.close();
+    };
+  } catch (e) {
+    stream.getTracks().forEach((t) => t.stop()); await ctx.close();
+    throw e;
+  }
 }
 
 async function putChunk(rid, seq, blob) {
@@ -231,30 +290,66 @@ async function putChunk(rid, seq, blob) {
   }
 }
 
-let recording = null;
+function setRecButton(on) { $('rec').textContent = on ? '■ 停止' : '● 开始录音'; $('rec').className = on ? 'rec' : 'primary'; }
+
+/** Uploads what is left and finishes; on failure keeps the chunks and offers a retry, so a created
+    recording never silently stays open. */
+async function finishRecording(rid, chunks, uploads) {
+  try {
+    await uploads;
+    for (let round = 0; round < 3; round++) {
+      const { missing } = await postJson(`/api/recordings/${rid}/finish`, { total_chunks: chunks.length });
+      if (!missing.length) { $('rec-info').className = 'muted'; $('rec-info').textContent = `已上传 ${chunks.length} 片，处理中`; return; }
+      for (const seq of missing) await putChunk(rid, seq, chunks[seq]);
+    }
+    throw new Error('补传 3 轮后仍有缺片');
+  } catch (e) {
+    $('rec-info').className = 'status bad';
+    $('rec-info').textContent = fail(`录音 ${rid.slice(0, 8)} 没能提交（音频还在本页）`, e);
+    const retry = el('button', '重试提交'); retry.onclick = () => { retry.remove(); finishRecording(rid, chunks, Promise.resolve()); };
+    $('rec-info').after(retry);
+  }
+}
+
+let recording = null, starting = false;
 $('rec').onclick = async () => {
   if (recording) return recording.stop();
-  const rid = crypto.randomUUID();
-  const started = await (await api('/api/recordings', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ recording_id: rid, started_at: new Date().toISOString() }) })).json();
-  if (started.ai === 'paused_quota') log('今日录音次数已用完：照常录音保存，额度恢复后自动整理', 'status wait');
-  const chunks = []; let pending = [], pendingLen = 0, uploads = Promise.resolve();
+  if (starting) return;
+  starting = true; $('rec').disabled = true;
+  const rid = crypto.randomUUID(), chunks = [];
+  let pending = [], pendingLen = 0, uploads = Promise.resolve(), uploadError = null;
   const flush = () => {
     if (!pendingLen) return;
     const all = new Float32Array(pendingLen); let o = 0; pending.forEach((p) => { all.set(p, o); o += p.length; });
     const seq = chunks.length, blob = wav(all); chunks.push(blob); pending = []; pendingLen = 0;
-    uploads = uploads.then(() => putChunk(rid, seq, blob)).catch((e) => log(e.message, 'status bad'));
+    uploads = uploads.then(() => putChunk(rid, seq, blob)).catch((e) => { uploadError ??= e; fail(`分片 ${seq} 上传失败（结束时会补传）`, e); });
   };
-  const stopCapture = await capture((s) => { pending.push(s); pendingLen += s.length; if (pendingLen >= RATE * CHUNK_SECONDS) flush(); });
-  const t0 = Date.now(); const timer = setInterval(() => { $('rec-info').textContent = `录音中 ${mmss((Date.now() - t0) / 1000)} · 已传 ${chunks.length} 片`; }, 500);
-  $('rec').textContent = '■ 停止'; $('rec').className = 'rec';
-  recording = { stop: async () => {
-    recording = null; clearInterval(timer); await stopCapture(); flush(); await uploads;
-    $('rec').textContent = '● 开始录音'; $('rec').className = 'primary'; $('rec-info').textContent = `已上传 ${chunks.length} 片，等待处理`;
-    for (let round = 0; round < 3; round++) {
-      const { missing } = await (await api(`/api/recordings/${rid}/finish`, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ total_chunks: chunks.length }) })).json();
-      if (!missing.length) return;
-      for (const seq of missing) await putChunk(rid, seq, chunks[seq]);
-    }
+  let stopCapture;
+  try {
+    // microphone first: if it cannot open, no recording is created on the server
+    stopCapture = await capture((s) => { pending.push(s); pendingLen += s.length; if (pendingLen >= RATE * CHUNK_SECONDS) flush(); }, () => recording?.stop('麦克风已断开'));
+  } catch (e) {
+    $('rec-info').className = 'status bad'; $('rec-info').textContent = fail('无法开始录音', e);
+    starting = false; $('rec').disabled = false; return;
+  }
+  try {
+    const started = await postJson('/api/recordings', { recording_id: rid, started_at: new Date().toISOString() });
+    if (started.ai === 'paused_quota') log('今日录音次数已用完：照常录音保存，额度恢复后自动整理', 'status wait');
+  } catch (e) {
+    await stopCapture();
+    $('rec-info').className = 'status bad'; $('rec-info').textContent = fail('无法开始录音', e);
+    starting = false; $('rec').disabled = false; return;
+  }
+  const t0 = Date.now();
+  $('rec-info').className = 'muted';
+  const timer = setInterval(() => { $('rec-info').textContent = `录音中 ${mmss((Date.now() - t0) / 1000)} · 已传 ${chunks.length} 片`; }, 500);
+  setRecButton(true); starting = false; $('rec').disabled = false;
+  recording = { stop: async (reason) => {
+    recording = null; clearInterval(timer); setRecButton(false);
+    if (reason) fail('录音中断', reason);
+    try { await stopCapture(); } catch (e) { fail('关闭麦克风出错', e); }
+    flush();
+    await finishRecording(rid, chunks, uploads);
   } };
 };
 
@@ -262,40 +357,51 @@ $('send').onclick = async () => {
   const text = $('text').value.trim(); if (!text) return;
   $('send').disabled = true;
   try {
-    const r = await api('/api/notes/text', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ idem_key: crypto.randomUUID(), text }) });
-    if (r.ok) $('text').value = '';
-  } finally { $('send').disabled = false; }
+    await postJson('/api/notes/text', { idem_key: crypto.randomUUID(), text });
+    $('text').value = '';
+  } catch (e) { fail('提交失败（文字还在输入框里）', e); }
+  finally { $('send').disabled = false; }
 };
 
 $('ask').onclick = async () => {
   const question = $('q').value.trim(); if (!question) return;
   const box = $('answer'); box.replaceChildren(el('div', '检索中…', 'muted'));
-  const r = await api('/api/ask', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ idem_key: crypto.randomUUID(), question }) });
-  if (r.status === 429) return box.replaceChildren(el('div', '本月提问次数已用完', 'status bad'));
-  box.replaceChildren();
-  await readSSE(r, (event, d) => {
-    if (event === 'step') box.append(el('div', `→ ${TOOL[d.tool] ?? d.tool} ${JSON.stringify(d.args)} ⇒ ${d.result.results ? d.result.results.length + ' 条' : JSON.stringify(d.result).slice(0, 120)}`));
-    if (event === 'error') box.append(el('div', `提问失败，本次不计次：${d.message}`, 'status bad'));
-    if (event === 'answer') {
-      const a = el('div', d.text, 'answer'); a.style.fontSize = '14px'; box.append(a);
-      const cites = el('div');
-      d.citations.forEach((c, i) => { const s = el('span', `出处 ${i + 1}：${fmt(c.started_at)} ${mmss(c.offset_seconds)}`, 'cite'); s.onclick = () => document.getElementById(`c-${c.conversation_id}`)?.scrollIntoView({ behavior:'smooth' }); cites.append(s); });
-      box.append(cites);
-    }
-  });
+  try {
+    const r = await api('/api/ask', { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify({ idem_key: crypto.randomUUID(), question }) });
+    if (r.status === 429) return box.replaceChildren(el('div', '本月提问次数已用完', 'status bad'));
+    if (!r.ok) throw new Error(`/api/ask 返回 ${r.status}`);
+    box.replaceChildren();
+    await readSSE(r, (event, d) => {
+      if (event === 'step') box.append(el('div', `→ ${TOOL[d.tool] ?? d.tool} ${JSON.stringify(d.args)} ⇒ ${d.result.results ? d.result.results.length + ' 条' : JSON.stringify(d.result).slice(0, 120)}`));
+      if (event === 'error') box.append(el('div', `提问失败，本次不计次：${d.message}`, 'status bad'));
+      if (event === 'answer') {
+        const a = el('div', d.text, 'answer'); a.style.fontSize = '14px'; box.append(a);
+        const cites = el('div');
+        d.citations.forEach((c, i) => { const s = el('span', `出处 ${i + 1}：${fmt(c.started_at)} ${mmss(c.offset_seconds)}`, 'cite'); s.onclick = () => document.getElementById(`c-${c.conversation_id}`)?.scrollIntoView({ behavior:'smooth' }); cites.append(s); });
+        box.append(cites);
+      }
+    });
+  } catch (e) { box.replaceChildren(el('div', fail('提问失败', e), 'status bad')); }
 };
 
+const VOICEPRINT_SECONDS = 12;
 $('vp').onclick = async () => {
   const parts = []; let n = 0;
-  const stop = await capture((s) => { parts.push(s); n += s.length; });
   $('vp').disabled = true;
-  for (let s = 12; s > 0; s--) { $('vp').textContent = `请朗读… ${s}`; await new Promise((r) => setTimeout(r, 1000)); }
-  await stop();
-  const all = new Float32Array(n); let o = 0; parts.forEach((p) => { all.set(p, o); o += p.length; });
-  const r = await api('/api/voiceprint', { method:'POST', headers:{ 'content-type':'audio/wav' }, body: wav(all) });
-  $('vp').disabled = false; $('vp').textContent = '读一段话注册（12 秒）';
-  if (!r.ok) alert((await r.json()).detail);
-  refresh();
+  try {
+    const stop = await capture((s) => { parts.push(s); n += s.length; });
+    for (let s = VOICEPRINT_SECONDS; s > 0; s--) { $('vp').textContent = `请朗读… ${s}`; await new Promise((r) => setTimeout(r, 1000)); }
+    await stop();
+    const all = new Float32Array(n); let o = 0; parts.forEach((p) => { all.set(p, o); o += p.length; });
+    const r = await api('/api/voiceprint', { method:'POST', headers:{ 'content-type':'audio/wav' }, body: wav(all) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `返回 ${r.status}`);
+    $('vp-state').className = 'muted';
+    refresh();
+  } catch (e) {
+    $('vp-state').className = 'status bad'; $('vp-state').textContent = fail('声纹注册失败', e);
+  } finally {
+    $('vp').disabled = false; $('vp').textContent = `读一段话注册（${VOICEPRINT_SECONDS} 秒）`;
+  }
 };
 
 subscribe();
