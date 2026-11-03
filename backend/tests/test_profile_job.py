@@ -1,10 +1,8 @@
 """Learning the profile is its own job: once minutes and actions are delivered the recording is done
 and charged, whatever happens to the profile update afterwards."""
-import time
-
 import pytest
 
-from tests.support import Client, Service, Stream, new_user
+from tests.support import Client, Service, Stream, new_user, profile_eventually
 
 ENV = {"JOB_MAX_ATTEMPTS": "2", "JOB_RETRY_BASE_SECONDS": "1"}
 TEXT = "下周三下午三点和张总开预算评审会"
@@ -15,16 +13,6 @@ def svc(db, llm):
     s = Service(db, llm, ENV).start()
     yield s
     s.stop()
-
-
-def profile_eventually(c: Client, timeout=30):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        items = c.http.get("/api/profile").json()
-        if items:
-            return items
-        time.sleep(0.3)
-    return []
 
 
 def test_profile_failure_does_not_fail_or_refund_a_delivered_recording_and_is_retried(svc):

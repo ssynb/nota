@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
-from tests.support import Client, Service, Stream, new_user, silence, speech, split, wav_bytes
+from tests.support import Client, Service, Stream, new_user, profile_eventually, silence, speech, split, wav_bytes
 
 OWNER_ENROL = "我是这台设备的主人，现在录一段声音用来注册声纹，请记住我说话的声音特点。"
 OWNER_MEETING = "下周三下午三点和张总开预算评审会，提前一天提醒我准备报表。"
@@ -168,7 +168,7 @@ def test_profile_is_learned_from_conversations_and_user_editable_within_200_char
     c = Client(svc.url, new_user())
     stream = Stream(svc.url, c.user)
     stream.recording_status(c.text_note("下周三下午三点和张总开预算评审会"), "done")
-    item = c.http.get("/api/profile").json()[0]
+    item = profile_eventually(c)[0]  # learned by its own job after the recording is done
 
     edited = c.http.put(f"/api/profile/{item['id']}", json={"category": "person", "content": "张总：张伟，客户方财务负责人"})
     too_long = c.http.put(f"/api/profile/{item['id']}", json={"category": "person", "content": "长" * 201})

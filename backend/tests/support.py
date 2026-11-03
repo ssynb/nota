@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import wave
 from io import BytesIO
@@ -248,6 +249,17 @@ class Stream:
 
     def recording_status(self, rid, status, timeout=180):
         return self.wait_for(lambda n, d: n == "recording" and d["recording_id"] == rid and d["status"] == status, timeout)
+
+
+def profile_eventually(c: Client, timeout=30):
+    """The profile is learned by its own job after the recording is done; waits until it has items."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        items = c.http.get("/api/profile").json()
+        if items:
+            return items
+        time.sleep(0.3)
+    return []
 
 
 # ---------- audio ----------
