@@ -117,7 +117,9 @@ class Service:
         return env
 
     def start_api(self, now=None):
-        port = free_port()
+        # keep one port across restarts so clients created before a restart still reach the service
+        self.port = getattr(self, "port", None) or free_port()
+        port = self.port
         self.api = Proc([sys.executable, "-m", "uvicorn", "nota.app:app", "--port", str(port), "--workers", "2"], self.env(now), "Application startup complete", count=2)
         self.api.wait_ready()
         self.url = f"http://127.0.0.1:{port}"

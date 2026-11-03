@@ -3,7 +3,7 @@
 Which call it is follows from the request: tools offered (agent vs ask) or the system prompt
 (meeting-minutes vs profile JSON). Behaviour is driven by markers in the user's material:
   评审会   -> agent calls create_calendar_event + create_todo + share_message
-  #fail    -> HTTP 500 on every call for that material
+  #fail / 失败案例 -> HTTP 500 on every call for that material (the second one can be spoken)
   #slow    -> the summary call takes SLOW_SECONDS
 Like DeepSeek thinking mode, follow-ups that drop reasoning_content are rejected.
 """
@@ -66,7 +66,7 @@ def respond(body):
     messages = body["messages"]
     system = messages[0]["content"]
     material = "\n".join(m.get("content") or "" for m in messages if m["role"] == "user")
-    if "#fail" in material:
+    if "#fail" in material or "失败案例" in material:
         return 500, {"error": {"message": "fake failure"}}
     if any(m["role"] == "assistant" and m.get("tool_calls") and not m.get("reasoning_content") for m in messages):
         return 400, {"error": {"message": "reasoning_content must be passed back"}}

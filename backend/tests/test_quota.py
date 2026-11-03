@@ -147,7 +147,7 @@ def test_ask_replays_same_answer_for_same_key(svc):
     again = c.ask("预算", key)
 
     answer = lambda events: next(d for n, d in events if n == "answer")
-    assert answer(again) == answer(first)
+    assert answer(again[1]) == answer(first[1])
     assert c.state()["quota"]["asks"]["used"] == 1
 
 
