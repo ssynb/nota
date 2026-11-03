@@ -31,7 +31,8 @@ class FakeServer {
     if (!online) throw http.ClientException('offline', r.url);
     headers.add(r.headers);
     final p = r.url.pathSegments;
-    http.Response ok(Object body) => http.Response(jsonEncode(body), 200);
+    http.Response ok(Object body) =>
+        http.Response.bytes(utf8.encode(jsonEncode(body)), 200);
     if (r.method == 'POST' && r.url.path == '/api/recordings') {
       final id = jsonDecode(r.body)['recording_id'] as String;
       created.add(id);
