@@ -55,6 +55,7 @@ class _SettingsPageState extends State<SettingsPage> {
             autocorrect: false,
             decoration: const InputDecoration(
               labelText: '服务器地址',
+              helperText: '重启 App 后生效',
               border: OutlineInputBorder(),
             ),
           ),
@@ -64,6 +65,7 @@ class _SettingsPageState extends State<SettingsPage> {
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(
               labelText: '分片时长（秒，不超过 60）',
+              helperText: '下次开始录音时生效',
               border: OutlineInputBorder(),
             ),
           ),

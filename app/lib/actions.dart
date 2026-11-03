@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'retry.dart';
 
 /// 系统日历（iOS EventKit）。
 abstract interface class DeviceCalendar {
@@ -48,8 +49,11 @@ class ActionRunner {
   final error = ValueNotifier<String?>(null);
 
   Future<void> _queue = Future.value();
+  late final _retry = RetryTimer(runPending);
 
-  Future<void> runPending() => _serial(_run);
+  Future<void> runPending() => _serial(_run, isFullRun: true);
+
+  void dispose() => _retry.dispose();
 
   /// 用户点“继续发送”：打开分享面板，发完才记为已执行并回报；取消则什么都不记。
   Future<void> sendShare(Map<String, dynamic> action) => _serial(() async {
@@ -75,16 +79,21 @@ class ActionRunner {
     await _reportUnreported(executed);
   });
 
-  /// 所有执行串行进行，并发触发也不会重复执行；失败记在 [error]，等下次触发重试。
-  Future<void> _serial(Future<void> Function() body) =>
-      _queue = _queue.then((_) async {
-        try {
-          await body();
-          error.value = null;
-        } catch (e) {
-          error.value = e.toString();
-        }
-      });
+  /// 所有执行串行进行，并发触发也不会重复执行；失败记在 [error]，并退避后自动重新拉取、补报。
+  /// 只有完整运行成功才复位重试：单条发送成功不代表之前失败的拉取已补上。
+  Future<void> _serial(
+    Future<void> Function() body, {
+    bool isFullRun = false,
+  }) => _queue = _queue.then((_) async {
+    try {
+      await body();
+      error.value = null;
+      if (isFullRun) _retry.report(failed: false);
+    } catch (e) {
+      error.value = e.toString();
+      _retry.report(failed: true);
+    }
+  });
 
   static Map<String, dynamic> _record(ActionResult r) => {
     'ok': r.ok,

@@ -40,9 +40,9 @@ class NotaController extends ChangeNotifier {
   final String _timezone;
   final Directory _uploadRoot;
 
-  late NotaApi api;
-  late ChunkUploader uploader;
-  late ActionRunner runner;
+  late final NotaApi api;
+  late final ChunkUploader uploader;
+  late final ActionRunner runner;
 
   Map<String, dynamic>? state;
   bool connected = false;
@@ -51,7 +51,6 @@ class NotaController extends ChangeNotifier {
   RecordingSession? session;
 
   StreamSubscription<SseEvent>? _events;
-  Completer<void>? _streamClosed;
   bool _disposed = false;
   Future<void>? _refreshing;
   bool _refreshAgain = false;
@@ -63,6 +62,7 @@ class NotaController extends ChangeNotifier {
       Directory('${supportDir.path}/recordings'),
     );
     c._connect();
+    await c.uploader.finishInterrupted();
     unawaited(c._listen());
     return c;
   }
@@ -87,13 +87,11 @@ class NotaController extends ChangeNotifier {
       ..error.addListener(notifyListeners);
   }
 
+  /// 分片时长下次开始录音时生效；服务器地址下次启动 App 时生效——
+  /// 运行中换地址会让进行中的录音上传和动作执行落在两套客户端上。
   Future<void> updateSettings(String baseUrl, int chunkSeconds) async {
     await _prefs.setString(_baseUrlKey, baseUrl);
     await _prefs.setInt(_chunkSecondsKey, chunkSeconds);
-    uploader.dispose();
-    _connect();
-    await _events?.cancel();
-    _streamClosed?.complete();
     notifyListeners();
   }
 
@@ -101,7 +99,7 @@ class NotaController extends ChangeNotifier {
   Future<void> _listen() async {
     var delay = const Duration(seconds: 1);
     while (!_disposed) {
-      final closed = _streamClosed = Completer<void>();
+      final closed = Completer<void>();
       try {
         final events = await api.stream();
         _events = events.listen(
@@ -235,6 +233,7 @@ class NotaController extends ChangeNotifier {
     _disposed = true;
     _events?.cancel();
     uploader.dispose();
+    runner.dispose();
     super.dispose();
   }
 }

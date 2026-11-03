@@ -5,11 +5,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import 'api.dart';
+import 'retry.dart';
 
 typedef UploadState = ({int unsent, String? error});
 
-const _minBackoff = Duration(seconds: 2);
-const _maxBackoff = Duration(seconds: 60);
 const _maxFinishRounds = 3;
 
 /// 录音分片的本地落盘与上传，模拟“设备经手机中转”。
@@ -29,8 +28,7 @@ class ChunkUploader {
   final state = ValueNotifier<UploadState>((unsent: 0, error: null));
 
   Future<void> _queue = Future.value();
-  Timer? _retry;
-  Duration _backoff = _minBackoff;
+  late final _retry = RetryTimer(sync);
   bool _disposed = false;
 
   Directory _dir(String id) => Directory('${root.path}/$id');
@@ -55,12 +53,29 @@ class ChunkUploader {
     unawaited(sync());
   }
 
+  /// App 启动、尚未开始新录音时调用：上次录音中途被杀、没写 `total` 的，
+  /// 按本地已存的分片收尾（内存里还没凑满一片的尾巴已随进程丢失）。
+  Future<void> finishInterrupted() async {
+    if (!root.existsSync()) return;
+    for (final dir in root.listSync().whereType<Directory>()) {
+      final id = dir.uri.pathSegments.lastWhere((s) => s.isNotEmpty);
+      if (_file(id, 'total').existsSync()) continue;
+      final seqs = dir
+          .listSync()
+          .map((f) => f.uri.pathSegments.last)
+          .where((n) => n.endsWith('.wav') || n.endsWith('.sent'))
+          .map((n) => int.parse(n.substring(0, n.indexOf('.'))));
+      final total = seqs.isEmpty ? 0 : seqs.reduce((a, b) => a > b ? a : b) + 1;
+      await finish(id, total);
+    }
+  }
+
   /// 把本地未确认的内容尽量送到服务端；网络失败时保留在本地并退避重试。
   Future<void> sync() => _queue = _queue.then((_) => _pass());
 
   void dispose() {
     _disposed = true;
-    _retry?.cancel();
+    _retry.dispose();
   }
 
   /// 先写临时文件再改名，进程被杀时不会留下半个分片。
@@ -85,7 +100,7 @@ class ChunkUploader {
       }
     }
     state.value = (unsent: _countUnsent(), error: error);
-    _scheduleRetry(failed: error != null);
+    _retry.report(failed: error != null);
   }
 
   Future<void> _syncRecording(String id) async {
@@ -141,16 +156,5 @@ class ChunkUploader {
         .listSync(recursive: true)
         .where((f) => f is File && f.path.endsWith('.wav'))
         .length;
-  }
-
-  void _scheduleRetry({required bool failed}) {
-    _retry?.cancel();
-    if (!failed || _disposed) {
-      _backoff = _minBackoff;
-      return;
-    }
-    _retry = Timer(_backoff, sync);
-    final next = _backoff * 2;
-    _backoff = next > _maxBackoff ? _maxBackoff : next;
   }
 }
