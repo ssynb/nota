@@ -107,15 +107,16 @@ def done(conn, lease: Lease):
     conn.execute("SELECT pg_notify(%s, '')", (CHANNEL,))
 
 
-def retry_or_fail(conn, lease: Lease, error: str) -> bool:
-    """Schedules a retry with exponential backoff and jitter; returns True when attempts are exhausted."""
+def retry_or_fail(conn, lease: Lease, error: str) -> float | None:
+    """Schedules a retry with exponential backoff and jitter and returns its delay in seconds;
+    returns None when attempts are exhausted and the job has failed."""
     if lease.attempts >= config.JOB_MAX_ATTEMPTS:
         conn.execute("UPDATE jobs SET status = 'failed', owner = NULL, last_error = %s WHERE recording_id = %s", (error, lease.recording_id))
-        return True
+        return None
     delay = config.JOB_RETRY_BASE_SECONDS * 2 ** (lease.attempts - 1) * random.uniform(1, 1.5)
     conn.execute(
         """UPDATE jobs SET status = 'queued', owner = NULL, last_error = %s, run_after = now() + make_interval(secs => %s)
            WHERE recording_id = %s""",
         (error, delay, lease.recording_id),
     )
-    return False
+    return delay

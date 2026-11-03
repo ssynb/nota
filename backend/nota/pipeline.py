@@ -262,8 +262,12 @@ def fail(lease: jobs.Lease, error: str):
     rec, user = _load(lease)
     with db.tx() as conn:
         lease.owned(conn)
-        if jobs.retry_or_fail(conn, lease, error[:500]):
-            quota.refund_recording(conn, rec["id"])
-            conn.execute("UPDATE recordings SET error = %s WHERE id = %s", (error[:500], rec["id"]))
-            _publish_status(conn, rec, "failed", error=error[:300])
-            quota.publish(conn, user)
+        delay = jobs.retry_or_fail(conn, lease, error[:500])
+        if delay is not None:  # tell the user what happened instead of a silent wait
+            notice = f"{error[:200]}；{delay:.0f} 秒后重试（第 {lease.attempts + 1}/{config.JOB_MAX_ATTEMPTS} 次）"
+            events.publish(conn, rec["user_id"], "recording", {"recording_id": str(rec["id"]), "status": rec["status"], "error": notice})
+            return
+        quota.refund_recording(conn, rec["id"])
+        conn.execute("UPDATE recordings SET error = %s WHERE id = %s", (error[:500], rec["id"]))
+        _publish_status(conn, rec, "failed", error=error[:300])
+        quota.publish(conn, user)

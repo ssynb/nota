@@ -15,7 +15,16 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://nota:nota@localhost:
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-flash")
-LLM_TIMEOUT_SECONDS = _float("LLM_TIMEOUT_SECONDS", 120)
+# One model call may take at most this long in total. A plain read timeout is not enough: under load
+# DeepSeek answers 200 at once and then sends keep-alive blank lines for minutes before the body.
+LLM_CALL_TIMEOUT_SECONDS = _float("LLM_CALL_TIMEOUT_SECONDS", 60)
+# A whole agent run (several model turns plus tools) may take at most this long.
+AGENT_TIMEOUT_SECONDS = _float("AGENT_TIMEOUT_SECONDS", 120)
+# Provider knobs, sent only when non-empty: DeepSeek `thinking` (enabled|disabled) and
+# `reasoning_effort` (low|high|max). `low` measured as good as the default `high` on the eval and
+# about a third faster (README); set it to an empty string for providers that reject the field.
+LLM_THINKING = os.environ.get("LLM_THINKING", "")
+LLM_REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "low")
 
 # Free plan
 FREE_RECORDINGS_PER_DAY = _int("QUOTA_FREE_RECORDINGS_PER_DAY", 10)

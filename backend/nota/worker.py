@@ -6,7 +6,7 @@ import logging
 import time
 import traceback
 
-from nota import config, db, jobs, pipeline, recordings, speech
+from nota import config, db, jobs, llm, pipeline, recordings, speech
 
 log = logging.getLogger("nota.worker")
 
@@ -30,7 +30,7 @@ def run_one() -> bool:
         except Exception as e:  # noqa: BLE001 — any failed step is retried, and refunded once attempts run out
             log.error("job %s failed: %s", lease.recording_id, traceback.format_exc())
             try:
-                pipeline.fail(lease, f"{type(e).__name__}: {e}")
+                pipeline.fail(lease, str(e) if isinstance(e, llm.LLMError) else f"{type(e).__name__}: {e}")
             except jobs.LeaseLost:
                 pass
     return True

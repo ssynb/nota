@@ -9,12 +9,14 @@ under the job lease, so a failed or superseded run leaves nothing behind.
 """
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as clock_time
 from zoneinfo import ZoneInfo
 
-from nota import actions, db, llm, notes
+from nota import actions, config, db, llm, notes
 from nota.conversations import render
 
 MAX_TURNS = 8
@@ -46,7 +48,12 @@ CREATE_EVENT = _fn(
      "alarm_minutes_before": {"type": "integer", "description": "开始前多少分钟提醒；到点提醒填 0；提前一天填 1440"}},
     ["title", "start"],
 )
-CREATE_TODO = _fn("create_todo", "新建一条待办（要用户去做、没有具体时间点的事）。待办不会到点提醒；用户要提醒的事用 create_calendar_event。同一件事已建日程就不要再建待办。", {"title": {"type": "string"}, "due": {**ISO, "description": "可选截止时间"}}, ["title"])
+CREATE_TODO = _fn(
+    "create_todo",
+    "新建一条待办（要用户去做、没有具体时间点的事）。待办不会到点提醒；用户要提醒的事用 create_calendar_event。同一件事已建日程就不要再建待办。",
+    {"title": {"type": "string"}, "due": {"type": "string", "description": "可选截止：只到某天写 YYYY-MM-DD（当天结束前），有钟点写带时区偏移的 ISO 8601"}},
+    ["title"],
+)
 SHARE = _fn("share_message", "给别人发消息或邀请。只起草，用户确认后由用户自己在手机上发送。", {"to": {"type": "string"}, "text": {"type": "string"}}, ["to", "text"])
 
 
@@ -78,16 +85,32 @@ def _time(value, field_name) -> datetime:
     return t
 
 
+def _due(value, tz: str) -> datetime:
+    """A date alone means "by the end of that day" in the user's timezone."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)):
+        return datetime.combine(date.fromisoformat(value), clock_time(23, 59), ZoneInfo(tz))
+    return _time(value, "due")
+
+
 def _bounded(result) -> str:
     text = json.dumps(result, ensure_ascii=False, default=str)
     return text if len(text) <= MAX_TOOL_RESULT_CHARS else text[:MAX_TOOL_RESULT_CHARS] + "…（已截断）"
 
 
 def run(messages: list[dict], tools: dict, on_step) -> str:
-    """tools: name -> (schema, fn(args) -> result). Tool errors go back to the model; LLM errors propagate."""
+    """tools: name -> (schema, fn(args) -> result). Tool errors go back to the model; LLM errors propagate.
+    The whole run, all turns included, finishes within AGENT_TIMEOUT_SECONDS or fails as a timeout."""
     schemas = [schema for schema, _ in tools.values()]
+    deadline = time.monotonic() + config.AGENT_TIMEOUT_SECONDS
     for _ in range(MAX_TURNS):
-        msg = llm.chat(messages, schemas)
+        if time.monotonic() >= deadline:
+            raise llm.LLMError(f"Agent 超时：{config.AGENT_TIMEOUT_SECONDS:.0f} 秒内没有完成")
+        try:
+            msg = llm.chat(messages, schemas, deadline=deadline)
+        except llm.LLMError as e:
+            if time.monotonic() >= deadline:
+                raise llm.LLMError(f"Agent 超时：{config.AGENT_TIMEOUT_SECONDS:.0f} 秒内没有完成") from e
+            raise
         messages.append(msg)  # whole message, incl. DeepSeek reasoning_content (required with tools)
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -164,7 +187,7 @@ def process(user, conversation: dict, overview: str, key_prefix: str, on_step) -
         title = str(args.get("title") or "").strip()
         if not title:
             raise ToolError("title 不能为空")
-        due = _time(args["due"], "due") if args.get("due") else None
+        due = _due(args["due"], user["timezone"]) if args.get("due") else None
         plan.todos.append({"text": title, "due_at": due})
         return {"ok": True}
 

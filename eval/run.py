@@ -230,8 +230,15 @@ class Sandbox:
 
 def run_cases(cases, fn, repeat):
     jobs = [(c, r) for c in cases for r in range(repeat)]
+
+    def timed(job):
+        started = time.perf_counter()
+        result = fn(job[0])
+        result["seconds"] = time.perf_counter() - started
+        return result
+
     with ThreadPoolExecutor(CONCURRENCY) as pool:
-        results = list(pool.map(lambda job: fn(job[0]), jobs))
+        results = list(pool.map(timed, jobs))
     by_case: dict[str, list] = {}
     for (c, _), res in zip(jobs, results):
         by_case.setdefault(c["id"], []).append(res)
@@ -249,7 +256,10 @@ def report(by_case, label):
             if r["problems"]:
                 print(f"      问题：{'；'.join(r['problems'])}\n      过程：{r['trace'][:300]}")
     rate = passed / total
-    return {"metric": f"{label} {passed}/{total}（{rate:.0%}）", "ok": rate >= THRESHOLDS[label_key(label)], "rate": rate}
+    seconds = sorted(r["seconds"] for v in by_case.values() for r in v)
+    latency = f"每条平均 {sum(seconds) / len(seconds):.1f}s、最慢 {seconds[-1]:.1f}s"
+    print(f"  耗时：{latency}")
+    return {"metric": f"{label} {passed}/{total}（{rate:.0%}），{latency}", "ok": rate >= THRESHOLDS[label_key(label)], "rate": rate}
 
 
 def label_key(label):
@@ -392,7 +402,8 @@ def main():
             started = time.perf_counter()
             summary[name] = STAGES[name](args)
             print(f"  （{time.perf_counter() - started:.0f}s）")
-    print("\n== 汇总 ==")
+    knobs = ", ".join(f"{k}={os.environ.get(k) or '默认'}" for k in ("LLM_MODEL", "LLM_THINKING", "LLM_REASONING_EFFORT"))
+    print(f"\n== 汇总 ==（{knobs}）")
     for name, r in summary.items():
         print(f"  {'✓' if r['ok'] else '✗'} {TITLES[name]}：{r['metric']}")
     sys.exit(0 if all(r["ok"] for r in summary.values()) else 1)
