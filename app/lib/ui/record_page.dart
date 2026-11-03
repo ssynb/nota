@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../controller.dart';
+import 'actions_page.dart';
 import 'format.dart';
 import 'settings_page.dart';
 import 'voiceprint_page.dart';
@@ -43,6 +44,8 @@ class RecordPage extends StatelessWidget {
             if (!c.connected) _Banner('未连上服务器，录音会先存在手机上', c.connectionError),
             if (c.runner.error.value != null)
               _Banner('动作执行或回报失败，联网后自动重试', c.runner.error.value),
+            for (final a in c.actionsNeedingUser)
+              ActionCard(c, a, margin: const EdgeInsets.symmetric(vertical: 8)),
             const SizedBox(height: 24),
             Center(child: _RecordButton(c)),
             const SizedBox(height: 12),

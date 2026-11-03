@@ -34,6 +34,9 @@ typedef ActionResult = ({bool ok, String? systemId, String? error});
 ///
 /// 执行结果先记在本地再回报：同一动作无论被拉到几次、回报是否丢失、App 是否重启，
 /// 都只执行一次；没回报成功的结果在下次运行时补报。
+///
+/// 日历动作拉到就执行；`share_message` 要弹系统分享面板，只在用户点“继续发送”时打开
+/// （[sendShare]），面板里取消则保持待发送，用户点“放弃”（[abandonShare]）才回报失败。
 class ActionRunner {
   ActionRunner(this.api, this.calendar, this.sharer, this.prefs);
   final NotaApi api;
@@ -46,7 +49,49 @@ class ActionRunner {
 
   Future<void> _queue = Future.value();
 
-  Future<void> runPending() => _queue = _queue.then((_) => _run());
+  Future<void> runPending() => _serial(_run);
+
+  /// 用户点“继续发送”：打开分享面板，发完才记为已执行并回报；取消则什么都不记。
+  Future<void> sendShare(Map<String, dynamic> action) => _serial(() async {
+    final executed = _executed;
+    final id = action['id'] as String;
+    if (!executed.containsKey(id)) {
+      final args = (action['args'] as Map).cast<String, dynamic>();
+      if (!await sharer.share(_message(args))) return;
+      executed[id] = _record((ok: true, systemId: null, error: null));
+      await _save(executed);
+    }
+    await _reportUnreported(executed);
+  });
+
+  /// 用户点“放弃”：不发了，回报失败。
+  Future<void> abandonShare(String id) => _serial(() async {
+    final executed = _executed;
+    executed.putIfAbsent(
+      id,
+      () => _record((ok: false, systemId: null, error: 'user_cancelled')),
+    );
+    await _save(executed);
+    await _reportUnreported(executed);
+  });
+
+  /// 所有执行串行进行，并发触发也不会重复执行；失败记在 [error]，等下次触发重试。
+  Future<void> _serial(Future<void> Function() body) =>
+      _queue = _queue.then((_) async {
+        try {
+          await body();
+          error.value = null;
+        } catch (e) {
+          error.value = e.toString();
+        }
+      });
+
+  static Map<String, dynamic> _record(ActionResult r) => {
+    'ok': r.ok,
+    'system_id': r.systemId,
+    'error': r.error,
+    'reported': false,
+  };
 
   Map<String, dynamic> get _executed =>
       jsonDecode(prefs.getString(_executedKey) ?? '{}') as Map<String, dynamic>;
@@ -55,25 +100,15 @@ class ActionRunner {
       prefs.setString(_executedKey, jsonEncode(executed));
 
   Future<void> _run() async {
-    try {
-      final executed = _executed;
-      for (final action in await api.pendingActions()) {
-        final id = action['id'] as String;
-        if (executed.containsKey(id) || action['status'] != 'pending') continue;
-        final r = await _execute(action);
-        executed[id] = {
-          'ok': r.ok,
-          'system_id': r.systemId,
-          'error': r.error,
-          'reported': false,
-        };
-        await _save(executed);
-      }
-      await _reportUnreported(executed);
-      error.value = null;
-    } catch (e) {
-      error.value = e.toString();
+    final executed = _executed;
+    for (final action in await api.pendingActions()) {
+      final id = action['id'] as String;
+      if (executed.containsKey(id) || action['status'] != 'pending') continue;
+      if (action['type'] == 'share_message') continue; // 等用户点继续发送
+      executed[id] = _record(await _execute(action));
+      await _save(executed);
     }
+    await _reportUnreported(executed);
   }
 
   Future<void> _reportUnreported(Map<String, dynamic> executed) async {
@@ -117,11 +152,6 @@ class ActionRunner {
           return deleted
               ? (ok: true, systemId: null, error: null)
               : (ok: false, systemId: null, error: 'event_not_found');
-        case 'share_message':
-          final sent = await sharer.share(_message(args));
-          return sent
-              ? (ok: true, systemId: null, error: null)
-              : (ok: false, systemId: null, error: 'user_cancelled');
         default:
           return (ok: false, systemId: null, error: 'unsupported_type');
       }

@@ -205,6 +205,19 @@ class NotaController extends ChangeNotifier {
     await s.stop();
   }
 
+  /// 要用户动手的动作：待确认的，以及已确认、等用户点继续发送的消息。
+  List<Map<String, dynamic>> get actionsNeedingUser => [
+    for (final a in list('actions'))
+      if (a['status'] == 'pending_confirmation' ||
+          (a['type'] == 'share_message' && a['status'] == 'pending'))
+        a,
+  ];
+
+  Future<void> sendShare(Map<String, dynamic> action) =>
+      runner.sendShare(action).then((_) => refresh());
+  Future<void> abandonShare(String id) =>
+      runner.abandonShare(id).then((_) => refresh());
+
   Future<void> confirm(String id) =>
       api.confirmAction(id).then((_) => refresh());
   Future<void> reject(String id) => api.rejectAction(id).then((_) => refresh());

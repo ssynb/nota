@@ -11,10 +11,8 @@ class ActionsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final actions = c.list('actions');
-    final toConfirm = actions.where(
-      (a) => a['status'] == 'pending_confirmation',
-    );
-    final others = actions.where((a) => a['status'] != 'pending_confirmation');
+    final needsUser = c.actionsNeedingUser;
+    final others = actions.where((a) => !needsUser.contains(a));
     final undone = {
       for (final a in actions)
         if (a['type'] == 'delete_calendar_event')
@@ -35,7 +33,7 @@ class ActionsPage extends StatelessWidget {
                   textAlign: TextAlign.center,
                 ),
               ),
-            for (final a in toConfirm) _ConfirmCard(c, a),
+            for (final a in needsUser) ActionCard(c, a),
             for (final a in others)
               _ActionTile(
                 c,
@@ -63,23 +61,34 @@ Future<void> _call(BuildContext context, Future<void> Function() fn) async {
   }
 }
 
-class _ConfirmCard extends StatelessWidget {
-  const _ConfirmCard(this.c, this.a);
+/// 需要用户动手的动作：待确认（拒绝 / 确认），或已确认待发送的消息（放弃 / 继续发送）。
+class ActionCard extends StatelessWidget {
+  const ActionCard(
+    this.c,
+    this.a, {
+    this.margin = const EdgeInsets.fromLTRB(16, 8, 16, 8),
+    super.key,
+  });
   final NotaController c;
   final Map<String, dynamic> a;
+  final EdgeInsets margin;
 
   @override
   Widget build(BuildContext context) {
     final (title, detail) = describeAction(a);
     final id = a['id'] as String;
+    final toSend = a['status'] == 'pending';
     return Card.outlined(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      margin: margin,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              toSend ? '待发送 · $title' : title,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 6),
             Text(detail),
             const SizedBox(height: 12),
@@ -87,13 +96,19 @@ class _ConfirmCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton(
-                  onPressed: () => _call(context, () => c.reject(id)),
-                  child: const Text('拒绝'),
+                  onPressed: () => _call(
+                    context,
+                    () => toSend ? c.abandonShare(id) : c.reject(id),
+                  ),
+                  child: Text(toSend ? '放弃' : '拒绝'),
                 ),
                 const SizedBox(width: 8),
                 FilledButton(
-                  onPressed: () => _call(context, () => c.confirm(id)),
-                  child: const Text('确认'),
+                  onPressed: () => _call(
+                    context,
+                    () => toSend ? c.sendShare(a) : c.confirm(id),
+                  ),
+                  child: Text(toSend ? '继续发送' : '确认'),
                 ),
               ],
             ),

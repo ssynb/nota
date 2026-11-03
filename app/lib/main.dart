@@ -47,10 +47,7 @@ class _ShellState extends State<_Shell> {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.c,
     builder: (context, _) {
-      final pendingConfirm = widget.c
-          .list('actions')
-          .where((a) => a['status'] == 'pending_confirmation')
-          .length;
+      final needsUser = widget.c.actionsNeedingUser.length;
       return Scaffold(
         body: IndexedStack(
           index: _tab,
@@ -72,8 +69,8 @@ class _ShellState extends State<_Shell> {
             const NavigationDestination(icon: Icon(Icons.notes), label: '纪要'),
             NavigationDestination(
               icon: Badge(
-                isLabelVisible: pendingConfirm > 0,
-                label: Text('$pendingConfirm'),
+                isLabelVisible: needsUser > 0,
+                label: Text('$needsUser'),
                 child: const Icon(Icons.event_available_outlined),
               ),
               label: '动作',
